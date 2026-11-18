@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="brand/fillmark-banner-dark.png">
+  <img src="brand/fillmark-banner.png" alt="Fillmark. Agent trades have a cost. Fillmark counts it.">
+</picture>
+
 # Fillmark Agents
 
 An on-chain execution-quality record for ERC-8004 agents trading Robinhood stock tokens
@@ -22,6 +27,7 @@ Robinhood Chain (4663). Tokens may have any number of decimals up to 18.
   own listing) and a Uniswap v3 USDG pool that filled $100 both ways within 10% of NAV
   when measured. Later tokens are added through the timelock.
 - `agent/`: reference DCA agent and client CLI (TypeScript, viem). See `agent/README.md`.
+- `brand/`: logo, mark, avatar and banner files. See `brand/README.md`.
 
 ## Deployment
 
@@ -38,13 +44,16 @@ Robinhood Chain (4663). Tag `v1.0.0` is the deployed source.
 The Safe is the timelock's proposer, executor and canceller, the timelock is its own admin,
 the router has no owner and cannot be upgraded, and the deployer holds no role.
 `deployments/4663.json` lists the deploy transactions, and `broadcast/Deploy.s.sol/4663/`
-holds the Foundry broadcast.
+holds the Foundry broadcast. A recursive clone builds bytecode identical to the deployed
+router and feeds.
 
 ## Tests
 
-Tests fork mainnet, no mocks:
+Clone with the submodules. Tests fork mainnet, no mocks:
 
 ```sh
+git clone --recursive https://github.com/fillmarkagents/fillmark
+cd fillmark
 forge build
 FILLMARK_RPC=<rpc url> forge test
 cd agent && npm ci && FILLMARK_UPSTREAM_RPC=<rpc url> ./e2e/run.sh
