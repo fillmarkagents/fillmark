@@ -1,0 +1,13 @@
+{
+  "router": "0x0000000000000000000000000000000000000000",
+  "agentId": "0",
+  "keyFile": "/etc/fillmark/agent_key",
+  "tickSec": 60,
+  "maxDevBps": 50,
+  "minOutBufferBps": 30,
+  "deadlineSec": 300,
+  "allowExtended": false,
+  "plans": [
+    { "account": "0x0000000000000000000000000000000000000000", "asset": "TSLA", "usdgPerBuy": "50", "intervalSec": 86400 }
+  ]
+}

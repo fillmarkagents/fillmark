@@ -1,0 +1,28 @@
+{
+  "chainId": 4663,
+  "owner": "0x6C3a19517e5c1cff510BC163DCA4a46C7a969261",
+  "safeOwners": [
+    "0xFbB4F3C60E740603698f63a2Df5Dc32f5C31a5d4",
+    "0xB127722f492712378727fAfbfBfa46cCf0caa91E",
+    "0x60b94E9613b2A541e6B417D98e66E04ECc8d48a6"
+  ],
+  "safeThreshold": 2,
+  "timelock": "0x54b6b215e216938Cb673b5d256593c0a1dDacAC3",
+  "feeds": "0xa54584AA004DD9E60522437A96F700d6d283EAA0",
+  "router": "0xe542a7c8779962b8f819c4352d1436e08bc2d388",
+  "deployer": "0x0c45BA239961efeedc8FDaD460CC4Bec6A12b4F1",
+  "guardian": "0x534eeE806911FF49529e49A6cb94A5B3A6e9cBc3",
+  "agent": "0xDCe0AAc0A8E6629A0ae3c739ced29B8B31c960B8",
+  "periods": 5,
+  "closures": 26,
+  "assets": 30,
+  "txs": [
+    "0x586edeee6c4dcde204e6579c29101bd74d7a72378574998d0ca159fe3cc5d873",
+    "0x2f3d2bddbbe8d6e7c3132cbbbc21a733407957f7d850d3ec5f1ec900ee3e6923",
+    "0xb94c5630f33603bf3b840a0f66b89f30922b97862e119bc9fbce07c95e557b77",
+    "0x887308017602dce6955054fcc4db4e8672caa583f156e4be283aa33b64d100c1",
+    "0xd09465ca2c545409e942403cacef1f64ac3cab0d7168f9d3b5badd58eeb7dbd9",
+    "0x5889aeef8f0dfbfb7a7754fcdbdfd69601713d9637d7443ed308435902b10959"
+  ],
+  "block": 117181502
+}

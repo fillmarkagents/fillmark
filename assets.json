@@ -1,0 +1,244 @@
+{
+  "stocks": [
+    {
+      "decimals": 18,
+      "feed": "0x6B22A786bAa607d76728168703a39Ea9C99f2cD0",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "AAPL",
+      "token": "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9"
+    },
+    {
+      "decimals": 18,
+      "feed": "0x943A29E7ae51A4798823ca9eEd2ed533B2A22C72",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "AMD",
+      "token": "0x86923f96303D656E4aa86D9d42D1e57ad2023fdC"
+    },
+    {
+      "decimals": 18,
+      "feed": "0xD5a1508ceD74c084eBf3cBe853e2C968fB2a651C",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "AMZN",
+      "token": "0x12f190a9F9d7D37a250758b26824B97CE941bF54"
+    },
+    {
+      "decimals": 18,
+      "feed": "0xB4106147E8cce40b7d46124090d373A71b70f87D",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "ASML",
+      "token": "0x47F93d52cBeC7C6D2CfC080e154002370a60dAEA"
+    },
+    {
+      "decimals": 18,
+      "feed": "0x62Cc8F9b5f56a33c9C8A60c8B92779f523c4E984",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "BABA",
+      "token": "0xad25Ac6C84D497db898fa1E8387bf6Af3532a1c4"
+    },
+    {
+      "decimals": 18,
+      "feed": "0xA3a468A452940B7D6b69991207B508c609a98Ef2",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "COIN",
+      "token": "0x6330D8C3178a418788dF01a47479c0ce7CCF450b"
+    },
+    {
+      "decimals": 18,
+      "feed": "0x6652eDf64bA3731C4F2D3ce821A0Fb1f1f6b482a",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "CRCL",
+      "token": "0xdF0992E440dD0be65BD8439b609d6D4366bf1CB5"
+    },
+    {
+      "decimals": 18,
+      "feed": "0x1C6c8cADBe02E19129c39dDB92281cE4c0bf206b",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "DELL",
+      "token": "0x941AE714EC6D8130c7B75d67160Ca08f1e7d11Dd"
+    },
+    {
+      "decimals": 18,
+      "feed": "0x470A51258068043bd43dC0a56245625C9fE86eB0",
+      "maxAge": 21600,
+      "multiplierInFeed": false,
+      "ticker": "GLD",
+      "token": "0xC9a981FEE1F9DEc688bb123ccDeCc63D0deBFC4e"
+    },
+    {
+      "decimals": 18,
+      "feed": "0x27C71df6A64fB476468EdF256CF72c038baB5B67",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "GME",
+      "token": "0x1b0E319c6A659F002271B69dB8A7df2F911c153E"
+    },
+    {
+      "decimals": 18,
+      "feed": "0xF6f373a037c30F0e5010d854385cA89185AE638b",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "GOOGL",
+      "token": "0x2e0847E8910a9732eB3fb1bb4b70a580ADAD4FE3"
+    },
+    {
+      "decimals": 18,
+      "feed": "0x3f390C5C24628Ac7C489515402235FeAD71D1913",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "INTC",
+      "token": "0xc72b96e0E48ecd4DC75E1e45396e26300BC39681"
+    },
+    {
+      "decimals": 18,
+      "feed": "0x7C38C00C30BEe9378381E7B6135d7283356D71b1",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "META",
+      "token": "0xc0D6457C16Cc70d6790Dd43521C899C87ce02f35"
+    },
+    {
+      "decimals": 18,
+      "feed": "0x45C3C877C15E6BA2EBB19eA114Ea508d14C1Af2E",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "MSFT",
+      "token": "0xe93237C50D904957Cf27E7B1133b510C669c2e74"
+    },
+    {
+      "decimals": 18,
+      "feed": "0x396118bdFB181e6240E74D243F266B061c0edc3D",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "MSTR",
+      "token": "0xec262a75e413fAfD0dF80480274532C79D42da09"
+    },
+    {
+      "decimals": 18,
+      "feed": "0x425EEFdCf05ed6526C3cE61Af99429A228a6d596",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "MU",
+      "token": "0xfF080c8ce2E5feadaCa0Da81314Ae59D232d4afD"
+    },
+    {
+      "decimals": 18,
+      "feed": "0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "NVDA",
+      "token": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC"
+    },
+    {
+      "decimals": 18,
+      "feed": "0x820ABedFF239034956B7A9d2F0a331f9F075eB4c",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "PLTR",
+      "token": "0x894E1EC2D74FFE5AEF8Dc8A9e84686acCB964F2A"
+    },
+    {
+      "decimals": 18,
+      "feed": "0x80901d846d5D7B030F26B480776EE3b29374C2ae",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "QQQ",
+      "token": "0xD5f3879160bc7c32ebb4dC785F8a4F505888de68"
+    },
+    {
+      "decimals": 18,
+      "feed": "0xa0DF4ee0fFf975306345875E3548Fcc519577A11",
+      "maxAge": 90000,
+      "multiplierInFeed": true,
+      "ticker": "SGOV",
+      "token": "0x92FD66527192E3e61d4DDd13322Aa222DE86F9B5"
+    },
+    {
+      "decimals": 18,
+      "feed": "0x209b73908e92Ae021826eD79609845451Ecba2ce",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "SLV",
+      "token": "0x411eFb0E7f985935DAec3D4C3ebaEa0d0AD7D89f"
+    },
+    {
+      "decimals": 18,
+      "feed": "0xfb133Fa4B7b385802B693a293606682Df47109A3",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "SNDK",
+      "token": "0xB90A19fF0Af67f7779afF50A882A9CfF42446400"
+    },
+    {
+      "decimals": 18,
+      "feed": "0xB265810950ba6c5C0Ff821c9963014a56fD8Bffb",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "SPCX",
+      "token": "0x4a0E65A3EcceC6dBe60AE065F2e7bb85Fae35eEa"
+    },
+    {
+      "decimals": 18,
+      "feed": "0x319724394D3A0e3669269846abE664Cd621f9f6A",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "SPY",
+      "token": "0x117cc2133c37B721F49dE2A7a74833232B3B4C0C"
+    },
+    {
+      "decimals": 18,
+      "feed": "0x4A1166a659A55625345e9515b32adECea5547C38",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "TSLA",
+      "token": "0x322F0929c4625eD5bAd873c95208D54E1c003b2d"
+    },
+    {
+      "decimals": 18,
+      "feed": "0x874cF94aa8eC88Fd9560094dD065f2fB3E41Fc2F",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "TSM",
+      "token": "0x58FfE4a942d3885bAa22D7520691F611EF09e7AA"
+    },
+    {
+      "decimals": 18,
+      "feed": "0xA994d3684e8400A6c8078226925779FdeE682DD9",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "USAR",
+      "token": "0xd917B029C761D264c6A312BBbcDA868658eF86a6"
+    },
+    {
+      "decimals": 18,
+      "feed": "0x75a9c76Ef439e2C7c2E5a34Ab105EcFe3766431c",
+      "maxAge": 21600,
+      "multiplierInFeed": true,
+      "ticker": "USO",
+      "token": "0xa30FA36Db767ad9eD3f7a60fC79526fB4d56D344"
+    }
+  ],
+  "crypto": [
+    {
+      "decimals": 8,
+      "feed": "0x0009cD492adf8167f9eEBf1293556A673530a21a",
+      "maxAge": 90000,
+      "ticker": "cbBTC",
+      "token": "0xCEC185eB182c47d1bA1EFc84e6959e18cd620Be4"
+    },
+    {
+      "decimals": 18,
+      "feed": "0x78F3556b67E17Df817D51Ef5a990cDaF09E8d3A9",
+      "maxAge": 90000,
+      "ticker": "WETH",
+      "token": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+name: CI
+
+permissions: {}
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: Foundry project
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      HAS_RPC: ${{ secrets.FILLMARK_RPC != '' }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1.9.2
+        with:
+          version: v1.8.3
+
+      - name: Show Forge version
+        run: forge --version
+
+      - name: Run Forge fmt
+        run: forge fmt --check
+
+      - name: Run Forge build
+        run: forge build --sizes
+
+      # Fork tests need a mainnet RPC; they run only when the FILLMARK_RPC secret is set.
+      - name: Run Forge tests
+        if: ${{ env.HAS_RPC == 'true' }}
+        env:
+          FILLMARK_RPC: ${{ secrets.FILLMARK_RPC }}
+        run: forge test -vvv
+
+      - name: Install Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Typecheck agent
+        working-directory: agent
+        run: npm ci && npm run typecheck
