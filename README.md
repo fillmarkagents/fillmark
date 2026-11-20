@@ -16,8 +16,8 @@ Robinhood Chain (4663). Tokens may have any number of decimals up to 18.
 - `src/FillmarkFeeds.sol`: token to Chainlink feed map, the US market calendar for
   stock tokens and halts for crypto tokens (which otherwise trade at any hour while
   their feed is fresh), add-only, administered through a timelock. A guardian may add
-  a closure or crypto halt at once (starting within 1 hour, at most 3 days per 30-day
-  window).
+  a closure or crypto halt at once (starting within 1 hour, at most 3 days per fixed
+  30-day window).
 - `script/Deploy.s.sol`: deploys the owner (a Safe 2-of-3), the timelock, feeds (every token
   in `assets.json` and the NYSE calendar through 2028) and router. A one-time deployer runs
   the setup, then hands the timelock's proposer, executor and canceller roles to the Safe
@@ -27,11 +27,14 @@ Robinhood Chain (4663). Tokens may have any number of decimals up to 18.
   own listing) and a Uniswap v3 USDG pool that filled $100 both ways within 10% of NAV
   when measured. Later tokens are added through the timelock.
 - `agent/`: reference DCA agent and client CLI (TypeScript, viem). See `agent/README.md`.
+  The agent is released on its own `agent-v*` tags; it can change while the deployed
+  contracts cannot.
 - `brand/`: logo, mark, avatar and banner files. See `brand/README.md`.
 
 ## Deployment
 
-Robinhood Chain (4663). Tag `v1.0.0` is the deployed source.
+Robinhood Chain (4663). Tag `v1.0.0` is the deployed source of the contracts. The
+reference agent that runs for ERC-8004 agent 26144 is the latest `agent-v*` tag.
 
 | Contract | Address |
 | --- | --- |
@@ -40,6 +43,7 @@ Robinhood Chain (4663). Tag `v1.0.0` is the deployed source.
 | FillmarkFeeds | `0xa54584AA004DD9E60522437A96F700d6d283EAA0` |
 | FillmarkRouter | `0xe542a7c8779962b8f819c4352d1436e08bc2d388` |
 | Guardian (closures and halts only) | `0x534eeE806911FF49529e49A6cb94A5B3A6e9cBc3` |
+| Reference DCA agent wallet, ERC-8004 agent 26144 (identity owned by the Safe) | `0xDCe0AAc0A8E6629A0ae3c739ced29B8B31c960B8` |
 
 The Safe is the timelock's proposer, executor and canceller, the timelock is its own admin,
 the router has no owner and cannot be upgraded, and the deployer holds no role.

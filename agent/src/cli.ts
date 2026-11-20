@@ -1,9 +1,13 @@
 // Fillmark client CLI: create a Kernel account with the router installed, check it,
-// withdraw from it and uninstall the router. The owner key signs user operations and
-// sends them to the EntryPoint itself, so no bundler is needed and the account pays
-// no gas (gas fees in the user operation are 0; the owner pays the transaction).
+// withdraw from it and uninstall the router. User operations go straight to the
+// EntryPoint, so no bundler is needed and the account pays no gas (gas fees in the user
+// operation are 0; the key in FILLMARK_KEY_FILE pays the transaction).
 //
-// Env: FILLMARK_ROUTER (required), FILLMARK_KEY_FILE (owner key, 0600),
+// The account owner can be that key, or another wallet (--owner at create). Then an
+// owner-only command prints the user operation and its hash, sends nothing and exits 2;
+// the owner signs the hash (personal_sign) and the command runs again with --signature.
+//
+// Env: FILLMARK_ROUTER (required), FILLMARK_KEY_FILE (sending key, 0600),
 //      FILLMARK_RPC or FILLMARK_RPC_FILE (default /etc/fillmark/rpc_url).
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -18,8 +22,11 @@ import {
   getAddress,
   isAddress,
   pad,
+  parseAbi,
   parseEventLogs,
   parseUnits,
+  recoverAddress,
+  recoverMessageAddress,
   toHex,
   zeroAddress,
   zeroHash,
@@ -52,33 +59,42 @@ const TOKENS: Record<string, { address: Address; decimals: number }> = { USDG: {
 for (const [t, address] of Object.entries(ASSETS)) TOKENS[t] = { address, decimals: ASSET_DECIMALS[t]! };
 
 const USAGE = `usage:
-  fillmark create    --agent-id N --max-per-trade USDG --daily-limit USDG --expiry-days N --max-slip-bps N --assets TSLA,NVDA,WETH,... [--salt N]
-  fillmark install   <account> (same flags as create, without --salt)
+  fillmark create    --agent-id N --max-per-trade USDG --daily-limit USDG (--expiry-days N | --expiry UNIX) --max-slip-bps N --assets TSLA,NVDA,WETH,... [--salt N] [--owner ADDRESS]
+  fillmark install   <account> (same flags as create, without --salt and --owner) [--signature 0x...]
   fillmark status    <account>
-  fillmark withdraw  <account> <USDG|ticker> <amount|all> [--to ADDRESS]
-  fillmark uninstall <account>
+  fillmark withdraw  <account> <USDG|ticker> <amount|all> [--to ADDRESS] [--signature 0x...]
+  fillmark uninstall <account> [--signature 0x...]
 
 tickers (assets.json, exact case): ${Object.keys(ASSETS).join(",")}`;
 
 type InstallOpts = { agentId: bigint; maxPerTrade: bigint; dailyLimit: bigint; expiry: bigint; maxSlipBps: number; assets: Address[] };
 
 function installOpts(v: Record<string, string | undefined>, now: bigint): InstallOpts {
-  for (const k of ["agent-id", "max-per-trade", "daily-limit", "expiry-days", "max-slip-bps", "assets"]) {
+  for (const k of ["agent-id", "max-per-trade", "daily-limit", "max-slip-bps", "assets"]) {
     if (!v[k]) throw new Error(`--${k} is required\n${USAGE}`);
   }
+  if ((v["expiry-days"] === undefined) === (v.expiry === undefined)) throw new Error(`give --expiry-days or --expiry\n${USAGE}`);
   const assets = v.assets!.split(",").map((t) => {
     if (!isTicker(t)) throw new Error(`unknown asset ${t}`);
     return ASSETS[t] as Address;
   });
   const maxSlipBps = Number(v["max-slip-bps"]);
   if (!Number.isInteger(maxSlipBps) || maxSlipBps < 1 || maxSlipBps > 1000) throw new Error("--max-slip-bps must be 1..1000");
-  const days = Number(v["expiry-days"]);
-  if (!Number.isInteger(days) || days < 1) throw new Error("--expiry-days must be a positive integer");
+  let expiry: bigint;
+  if (v.expiry !== undefined) {
+    if (!/^[0-9]{1,12}$/.test(v.expiry)) throw new Error("--expiry must be a unix time in seconds");
+    expiry = BigInt(v.expiry);
+    if (expiry <= now) throw new Error("--expiry is in the past");
+  } else {
+    const days = Number(v["expiry-days"]);
+    if (!Number.isInteger(days) || days < 1) throw new Error("--expiry-days must be a positive integer");
+    expiry = now + BigInt(days) * 86_400n;
+  }
   return {
     agentId: BigInt(v["agent-id"]!),
     maxPerTrade: parseUnits(v["max-per-trade"]!, 6),
     dailyLimit: parseUnits(v["daily-limit"]!, 6),
-    expiry: now + BigInt(days) * 86_400n,
+    expiry,
     maxSlipBps,
     assets,
   };
@@ -97,8 +113,9 @@ function installData(router: Address, o: InstallOpts): Hex {
   });
 }
 
-function out(obj: unknown) {
+function out(obj: Record<string, unknown>) {
   console.log(JSON.stringify(obj, (_, v) => (typeof v === "bigint" ? v.toString() : v), 2));
+  if (obj.sent === false) process.exitCode = 2; // waiting for the owner's signature
 }
 
 function addressArg(a: string | undefined, name: string): Address {
@@ -106,20 +123,42 @@ function addressArg(a: string | undefined, name: string): Address {
   return getAddress(a);
 }
 
-function ownerKey(): PrivateKeyAccount {
+function senderKey(): PrivateKeyAccount {
   const path = process.env.FILLMARK_KEY_FILE;
   if (!path) throw new Error("FILLMARK_KEY_FILE is not set");
   return loadKey(path);
 }
 
+const validatorAbi = parseAbi(["function ecdsaValidatorStorage(address) view returns (address owner)"]);
+
+async function accountOwner(account: Address): Promise<Address> {
+  const { pub } = clients();
+  const owner = await pub.readContract({ address: ECDSA_VALIDATOR, abi: validatorAbi, functionName: "ecdsaValidatorStorage", args: [account] });
+  if (owner === zeroAddress) throw new Error(`${account} has no ECDSA owner`);
+  return owner;
+}
+
+/// A 65-byte signature with v as 27/28 (some wallets return 0/1, which ecrecover rejects).
+function signatureArg(s: string | undefined): Hex | undefined {
+  if (s === undefined) return undefined;
+  if (!/^0x[0-9a-fA-F]{130}$/.test(s)) throw new Error("--signature must be a 65-byte hex signature");
+  const v = parseInt(s.slice(130), 16);
+  return (v < 27 ? s.slice(0, 130) + (v + 27).toString(16) : s) as Hex;
+}
+
 const VERIFICATION_GAS = 300_000n;
 const CALL_GAS = 1_000_000n;
 
-/// Signs a user operation with the owner key and sends it through EntryPoint.handleOps.
-/// The hash is computed here, never taken from the RPC: a signature over a hash the
-/// RPC chose could authorize any call from the account.
-async function sendUserOp(owner: PrivateKeyAccount, account: Address, callData: Hex) {
-  const { pub, wallet } = clients(owner);
+type OpResult =
+  | { tx: Hex }
+  | { sent: false; owner: Address; userOpHash: Hex; userOp: Record<string, unknown>; next: string };
+
+/// Sends a user operation through EntryPoint.handleOps, signed by the sending key when it
+/// is the account owner, or by the owner's signature. Without one, returns the operation
+/// and the hash to sign, and sends nothing. The hash is computed here, never taken from
+/// the RPC: a signature over a hash the RPC chose could authorize any call from the account.
+async function sendUserOp(sender: PrivateKeyAccount, account: Address, owner: Address, callData: Hex, ownerSig?: Hex): Promise<OpResult> {
+  const { pub, wallet } = clients(sender);
   const nonce = await pub.readContract({ address: ENTRY_POINT, abi: entryPointAbi, functionName: "getNonce", args: [account, 0n] });
   const opHash = getUserOperationHash({
     chainId: 4663,
@@ -132,7 +171,7 @@ async function sendUserOp(owner: PrivateKeyAccount, account: Address, callData: 
       verificationGasLimit: VERIFICATION_GAS,
       callGasLimit: CALL_GAS,
       preVerificationGas: 0n,
-      maxFeePerGas: 0n, // the account pays nothing; the owner pays the transaction
+      maxFeePerGas: 0n, // the account pays nothing; the sending key pays the transaction
       maxPriorityFeePerGas: 0n,
       signature: "0x",
     },
@@ -146,14 +185,32 @@ async function sendUserOp(owner: PrivateKeyAccount, account: Address, callData: 
     preVerificationGas: 0n,
     gasFees: zeroHash,
     paymasterAndData: "0x" as Hex,
-    signature: await owner.sign({ hash: opHash }),
+    signature: "0x" as Hex,
   };
+  if (owner === sender.address) {
+    if (ownerSig) throw new Error("--signature is not needed: the sending key is the owner");
+    op.signature = await sender.sign({ hash: opHash });
+  } else if (!ownerSig) {
+    return {
+      sent: false,
+      owner,
+      userOpHash: opHash,
+      userOp: { chainId: 4663, entryPoint: ENTRY_POINT, sender: account, nonce, callData, verificationGasLimit: VERIFICATION_GAS, callGasLimit: CALL_GAS, gasFees: 0 },
+      next: "sign userOpHash with the owner wallet (personal_sign), then run the same command with --signature",
+    };
+  } else {
+    const raw = await recoverAddress({ hash: opHash, signature: ownerSig }).catch(() => zeroAddress);
+    const eth = await recoverMessageAddress({ message: { raw: opHash }, signature: ownerSig }).catch(() => zeroAddress);
+    if (raw !== owner && eth !== owner)
+      throw new Error(`the signature is not the owner's (${owner}) over user operation ${opHash}; the nonce or amount may have changed, run the command again without --signature`);
+    op.signature = ownerSig;
+  }
   const { request } = await pub.simulateContract({
     address: ENTRY_POINT,
     abi: entryPointAbi,
     functionName: "handleOps",
-    args: [[op], owner.address],
-    account: owner,
+    args: [[op], sender.address],
+    account: sender,
   });
   const hash = await wallet!.writeContract(request);
   const receipt = await pub.waitForTransactionReceipt({ hash });
@@ -169,19 +226,21 @@ async function sendUserOp(owner: PrivateKeyAccount, account: Address, callData: 
     const data = reason?.eventName === "UserOperationRevertReason" ? reason.args.revertReason : "0x";
     throw new Error(`user operation failed in ${hash}: ${data}`);
   }
-  return hash;
+  return { tx: hash };
 }
 
 async function create(v: Record<string, string | undefined>) {
-  const owner = ownerKey();
+  const sender = senderKey();
+  const owner = v.owner ? addressArg(v.owner, "--owner") : sender.address;
   const router = addressArg(process.env.FILLMARK_ROUTER, "FILLMARK_ROUTER");
-  const { pub, wallet } = clients(owner);
+  const { pub, wallet } = clients(sender);
+  if (owner === zeroAddress || (await pub.getCode({ address: owner }))) throw new Error("--owner must be a wallet address (no contract code)");
   const opts = installOpts(v, await checkedNow(pub));
   const root = concat(["0x01", ECDSA_VALIDATOR]);
   const data = encodeFunctionData({
     abi: kernelAbi,
     functionName: "initialize",
-    args: [root, "0x0000000000000000000000000000000000000001", owner.address, "0x", [installData(router, opts)]],
+    args: [root, "0x0000000000000000000000000000000000000001", owner, "0x", [installData(router, opts)]],
   });
   const salt = pad(toHex(BigInt(v.salt ?? "0")), { size: 32 });
   const account = kernelAccountAddress(data, salt);
@@ -193,46 +252,58 @@ async function create(v: Record<string, string | undefined>) {
     abi: kernelFactoryAbi,
     functionName: "createAccount",
     args: [data, salt],
-    account: owner,
+    account: sender,
   });
   const hash = await wallet!.writeContract(request);
   const receipt = await pub.waitForTransactionReceipt({ hash });
   if (receipt.status !== "success") throw new Error(`createAccount tx ${hash} reverted`);
-  out({ account, owner: owner.address, router, tx: hash });
+  if ((await accountOwner(account)) !== owner) throw new Error(`account ${account} was created without owner ${owner}`);
+  out({ account, owner, paidBy: sender.address, router, tx: hash });
 }
 
-async function install(account: Address, v: Record<string, string | undefined>) {
-  const owner = ownerKey();
+async function install(account: Address, v: Record<string, string | undefined>, sig?: Hex) {
+  const sender = senderKey();
   const router = addressArg(process.env.FILLMARK_ROUTER, "FILLMARK_ROUTER");
   const { pub } = clients();
   const opts = installOpts(v, await checkedNow(pub));
-  out({ account, tx: await sendUserOp(owner, account, installData(router, opts)) });
+  const r = await sendUserOp(sender, account, await accountOwner(account), installData(router, opts), sig);
+  // The expiry is part of the signed operation: the signed run must reuse it.
+  if ("sent" in r) r.next = `sign userOpHash with the owner wallet (personal_sign), then run the same command with --expiry ${opts.expiry} instead of --expiry-days, and --signature`;
+  out({ account, expiry: opts.expiry, ...r });
 }
 
-async function uninstall(account: Address) {
-  const owner = ownerKey();
+async function uninstall(account: Address, sig?: Hex) {
+  const sender = senderKey();
   const router = addressArg(process.env.FILLMARK_ROUTER, "FILLMARK_ROUTER");
   const callData = encodeFunctionData({ abi: kernelAbi, functionName: "uninstallModule", args: [EXECUTOR, router, "0x"] });
-  out({ account, tx: await sendUserOp(owner, account, callData) });
+  out({ account, ...(await sendUserOp(sender, account, await accountOwner(account), callData, sig)) });
 }
 
-async function withdraw(account: Address, symbol: string | undefined, amount: string | undefined, to: string | undefined) {
+async function withdraw(account: Address, symbol: string | undefined, amount: string | undefined, to: string | undefined, sig?: Hex) {
   const token = symbol && Object.hasOwn(TOKENS, symbol) ? TOKENS[symbol] : undefined;
   if (!token || !amount) throw new Error(USAGE);
-  const owner = ownerKey();
+  const sender = senderKey();
   const { pub } = clients();
   const value =
     amount === "all"
       ? await pub.readContract({ address: token.address, abi: erc20Abi, functionName: "balanceOf", args: [account] })
       : parseUnits(amount, token.decimals);
-  const recipient = to ? addressArg(to, "--to") : owner.address;
+  // The owner is read once; with a wallet owner the recipient must be given, so the RPC
+  // cannot choose where the tokens go.
+  const owner = await accountOwner(account);
+  let recipient: Address;
+  if (to) recipient = addressArg(to, "--to");
+  else if (owner === sender.address) recipient = sender.address;
+  else throw new Error("the account owner is a wallet: give --to with the address that receives the tokens");
   const transfer = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [recipient, value] });
   const callData = encodeFunctionData({
     abi: kernelAbi,
     functionName: "execute",
     args: [zeroHash, encodePacked(["address", "uint256", "bytes"], [token.address, 0n, transfer])],
   });
-  out({ account, token: symbol, amount: formatUnits(value, token.decimals), to: recipient, tx: await sendUserOp(owner, account, callData) });
+  const r = await sendUserOp(sender, account, owner, callData, sig);
+  if ("sent" in r) r.next = `sign userOpHash with the owner wallet (personal_sign), then run the same command with amount ${formatUnits(value, token.decimals)} and --signature`;
+  out({ account, token: symbol, amount: formatUnits(value, token.decimals), to: recipient, ...r });
 }
 
 async function status(account: Address) {
@@ -260,6 +331,7 @@ async function status(account: Address) {
   }
   out({
     account,
+    owner: await accountOwner(account).catch(() => null),
     installed,
     agentId,
     agentWallet: wallet,
@@ -285,21 +357,27 @@ async function main() {
       "max-slip-bps": { type: "string" },
       assets: { type: "string" },
       salt: { type: "string" },
+      expiry: { type: "string" },
+      owner: { type: "string" },
       to: { type: "string" },
+      signature: { type: "string" },
     },
   });
   const [cmd, a1, a2, a3] = positionals;
+  const sig = signatureArg(values.signature);
+  if (sig && !["install", "withdraw", "uninstall"].includes(cmd ?? "")) throw new Error(`--signature is not used by ${cmd}\n${USAGE}`);
+  if (values.owner && cmd !== "create") throw new Error(`--owner is only for create\n${USAGE}`);
   switch (cmd) {
     case "create":
       return create(values);
     case "install":
-      return install(addressArg(a1, "account"), values);
+      return install(addressArg(a1, "account"), values, sig);
     case "status":
       return status(addressArg(a1, "account"));
     case "withdraw":
-      return withdraw(addressArg(a1, "account"), a2, a3, values.to);
+      return withdraw(addressArg(a1, "account"), a2, a3, values.to, sig);
     case "uninstall":
-      return uninstall(addressArg(a1, "account"));
+      return uninstall(addressArg(a1, "account"), sig);
     default:
       throw new Error(USAGE);
   }
