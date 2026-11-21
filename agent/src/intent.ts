@@ -17,7 +17,7 @@ export type FillIntent = {
   deadline: bigint;
 };
 
-// Must match FillmarkRouter.INTENT_TYPEHASH.
+// Must match FillmarkRouterV2.INTENT_TYPEHASH.
 export const intentTypes = {
   FillIntent: [
     { name: "agentId", type: "uint256" },
@@ -37,7 +37,7 @@ export const intentTypes = {
 } as const;
 
 export function intentDomain(router: Address, chainId: number) {
-  return { name: "Fillmark", version: "1", chainId, verifyingContract: router } as const;
+  return { name: "Fillmark", version: "2", chainId, verifyingContract: router } as const;
 }
 
 export function signIntent(agent: PrivateKeyAccount, router: Address, chainId: number, it: FillIntent): Promise<Hex> {

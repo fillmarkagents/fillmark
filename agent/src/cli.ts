@@ -1,5 +1,5 @@
-// Fillmark client CLI: create a Kernel account with the router installed, check it,
-// withdraw from it and uninstall the router. User operations go straight to the
+// Fillmark client CLI: create a Kernel account with router v2 installed, check it,
+// withdraw from it, uninstall the router, and settle, close out or pay an agent's fees. User operations go straight to the
 // EntryPoint, so no bundler is needed and the account pays no gas (gas fees in the user
 // operation are 0; the key in FILLMARK_KEY_FILE pays the transaction).
 //
@@ -59,18 +59,23 @@ const TOKENS: Record<string, { address: Address; decimals: number }> = { USDG: {
 for (const [t, address] of Object.entries(ASSETS)) TOKENS[t] = { address, decimals: ASSET_DECIMALS[t]! };
 
 const USAGE = `usage:
-  fillmark create    --agent-id N --max-per-trade USDG --daily-limit USDG (--expiry-days N | --expiry UNIX) --max-slip-bps N --assets TSLA,NVDA,WETH,... [--salt N] [--owner ADDRESS]
+  fillmark create    --agent-id N --max-per-trade USDG --daily-limit USDG (--expiry-days N | --expiry UNIX) --max-slip-bps N --perf-fee-bps N --assets TSLA,NVDA,WETH,... [--salt N] [--owner ADDRESS]
   fillmark install   <account> (same flags as create, without --salt and --owner) [--signature 0x...]
-  fillmark status    <account>
+  fillmark status    <account> [--agent-id N]
   fillmark withdraw  <account> <USDG|ticker> <amount|all> [--to ADDRESS] [--signature 0x...]
   fillmark uninstall <account> [--signature 0x...]
+  fillmark settle    <account>
+  fillmark close-out <account> --agent-id N
+  fillmark pay-debt  <account> --agent-id N [--signature 0x...]
+
+--perf-fee-bps is the share of net realized gains the agent earns (0 to 3000, the agent's terms).
 
 tickers (assets.json, exact case): ${Object.keys(ASSETS).join(",")}`;
 
-type InstallOpts = { agentId: bigint; maxPerTrade: bigint; dailyLimit: bigint; expiry: bigint; maxSlipBps: number; assets: Address[] };
+type InstallOpts = { agentId: bigint; maxPerTrade: bigint; dailyLimit: bigint; expiry: bigint; maxSlipBps: number; perfFeeBps: number; assets: Address[] };
 
 function installOpts(v: Record<string, string | undefined>, now: bigint): InstallOpts {
-  for (const k of ["agent-id", "max-per-trade", "daily-limit", "max-slip-bps", "assets"]) {
+  for (const k of ["agent-id", "max-per-trade", "daily-limit", "max-slip-bps", "perf-fee-bps", "assets"]) {
     if (!v[k]) throw new Error(`--${k} is required\n${USAGE}`);
   }
   if ((v["expiry-days"] === undefined) === (v.expiry === undefined)) throw new Error(`give --expiry-days or --expiry\n${USAGE}`);
@@ -80,6 +85,8 @@ function installOpts(v: Record<string, string | undefined>, now: bigint): Instal
   });
   const maxSlipBps = Number(v["max-slip-bps"]);
   if (!Number.isInteger(maxSlipBps) || maxSlipBps < 1 || maxSlipBps > 1000) throw new Error("--max-slip-bps must be 1..1000");
+  if (!/^[0-9]{1,4}$/.test(v["perf-fee-bps"]!) || Number(v["perf-fee-bps"]) > 3000) throw new Error("--perf-fee-bps must be 0..3000");
+  const perfFeeBps = Number(v["perf-fee-bps"]);
   let expiry: bigint;
   if (v.expiry !== undefined) {
     if (!/^[0-9]{1,12}$/.test(v.expiry)) throw new Error("--expiry must be a unix time in seconds");
@@ -96,6 +103,7 @@ function installOpts(v: Record<string, string | undefined>, now: bigint): Instal
     dailyLimit: parseUnits(v["daily-limit"]!, 6),
     expiry,
     maxSlipBps,
+    perfFeeBps,
     assets,
   };
 }
@@ -103,8 +111,8 @@ function installOpts(v: Record<string, string | undefined>, now: bigint): Instal
 /// Kernel v3.1 executor install data: hook address (none), then the router's onInstall data.
 function installData(router: Address, o: InstallOpts): Hex {
   const data = encodeAbiParameters(
-    [{ type: "uint256" }, { type: "uint128" }, { type: "uint128" }, { type: "uint64" }, { type: "uint16" }, { type: "address[]" }],
-    [o.agentId, o.maxPerTrade, o.dailyLimit, o.expiry, o.maxSlipBps, o.assets],
+    [{ type: "uint256" }, { type: "uint128" }, { type: "uint128" }, { type: "uint64" }, { type: "uint16" }, { type: "uint16" }, { type: "address[]" }],
+    [o.agentId, o.maxPerTrade, o.dailyLimit, o.expiry, o.maxSlipBps, o.perfFeeBps, o.assets],
   );
   return encodeFunctionData({
     abi: kernelAbi,
@@ -148,6 +156,9 @@ function signatureArg(s: string | undefined): Hex | undefined {
 
 const VERIFICATION_GAS = 300_000n;
 const CALL_GAS = 1_000_000n;
+// Removing the router closes the agent's book in the same call, and an install first
+// closes a book left open: room for a large book (about 90k gas per token).
+const BOOK_GAS = 4_000_000n;
 
 type OpResult =
   | { tx: Hex }
@@ -157,7 +168,7 @@ type OpResult =
 /// is the account owner, or by the owner's signature. Without one, returns the operation
 /// and the hash to sign, and sends nothing. The hash is computed here, never taken from
 /// the RPC: a signature over a hash the RPC chose could authorize any call from the account.
-async function sendUserOp(sender: PrivateKeyAccount, account: Address, owner: Address, callData: Hex, ownerSig?: Hex): Promise<OpResult> {
+async function sendUserOp(sender: PrivateKeyAccount, account: Address, owner: Address, callData: Hex, ownerSig?: Hex, callGas = CALL_GAS): Promise<OpResult> {
   const { pub, wallet } = clients(sender);
   const nonce = await pub.readContract({ address: ENTRY_POINT, abi: entryPointAbi, functionName: "getNonce", args: [account, 0n] });
   const opHash = getUserOperationHash({
@@ -169,7 +180,7 @@ async function sendUserOp(sender: PrivateKeyAccount, account: Address, owner: Ad
       nonce,
       callData,
       verificationGasLimit: VERIFICATION_GAS,
-      callGasLimit: CALL_GAS,
+      callGasLimit: callGas,
       preVerificationGas: 0n,
       maxFeePerGas: 0n, // the account pays nothing; the sending key pays the transaction
       maxPriorityFeePerGas: 0n,
@@ -181,7 +192,7 @@ async function sendUserOp(sender: PrivateKeyAccount, account: Address, owner: Ad
     nonce,
     initCode: "0x" as Hex,
     callData,
-    accountGasLimits: pad(toHex((VERIFICATION_GAS << 128n) | CALL_GAS), { size: 32 }),
+    accountGasLimits: pad(toHex((VERIFICATION_GAS << 128n) | callGas), { size: 32 }),
     preVerificationGas: 0n,
     gasFees: zeroHash,
     paymasterAndData: "0x" as Hex,
@@ -195,7 +206,7 @@ async function sendUserOp(sender: PrivateKeyAccount, account: Address, owner: Ad
       sent: false,
       owner,
       userOpHash: opHash,
-      userOp: { chainId: 4663, entryPoint: ENTRY_POINT, sender: account, nonce, callData, verificationGasLimit: VERIFICATION_GAS, callGasLimit: CALL_GAS, gasFees: 0 },
+      userOp: { chainId: 4663, entryPoint: ENTRY_POINT, sender: account, nonce, callData, verificationGasLimit: VERIFICATION_GAS, callGasLimit: callGas, gasFees: 0 },
       next: "sign userOpHash with the owner wallet (personal_sign), then run the same command with --signature",
     };
   } else {
@@ -266,17 +277,31 @@ async function install(account: Address, v: Record<string, string | undefined>, 
   const router = addressArg(process.env.FILLMARK_ROUTER, "FILLMARK_ROUTER");
   const { pub } = clients();
   const opts = installOpts(v, await checkedNow(pub));
-  const r = await sendUserOp(sender, account, await accountOwner(account), installData(router, opts), sig);
+  const r = await sendUserOp(sender, account, await accountOwner(account), installData(router, opts), sig, BOOK_GAS);
   // The expiry is part of the signed operation: the signed run must reuse it.
   if ("sent" in r) r.next = `sign userOpHash with the owner wallet (personal_sign), then run the same command with --expiry ${opts.expiry} instead of --expiry-days, and --signature`;
   out({ account, expiry: opts.expiry, ...r });
 }
 
+/// Removing the router closes the agent's book at the NAV of that moment when every
+/// token can be priced; otherwise the book stays open until close-out runs.
 async function uninstall(account: Address, sig?: Hex) {
   const sender = senderKey();
   const router = addressArg(process.env.FILLMARK_ROUTER, "FILLMARK_ROUTER");
+  const { pub } = clients();
+  const [agentId] = await pub.readContract({ address: router, abi: routerAbi, functionName: "configs", args: [account] });
   const callData = encodeFunctionData({ abi: kernelAbi, functionName: "uninstallModule", args: [EXECUTOR, router, "0x"] });
-  out({ account, ...(await sendUserOp(sender, account, await accountOwner(account), callData, sig)) });
+  const r = await sendUserOp(sender, account, await accountOwner(account), callData, sig, BOOK_GAS);
+  if ("sent" in r) return out({ account, agentId, ...r });
+  const book = await pub.readContract({ address: router, abi: routerAbi, functionName: "bookOf", args: [account, agentId] });
+  out({
+    account,
+    agentId,
+    ...r,
+    bookClosed: !book.closing,
+    debtUsdg: formatUnits(book.debt, 6),
+    ...(book.closing ? { next: `close-out did not run (no price for a token now): run close-out ${account} --agent-id ${agentId} once there is one` } : {}),
+  });
 }
 
 async function withdraw(account: Address, symbol: string | undefined, amount: string | undefined, to: string | undefined, sig?: Hex) {
@@ -306,11 +331,13 @@ async function withdraw(account: Address, symbol: string | undefined, amount: st
   out({ account, token: symbol, amount: formatUnits(value, token.decimals), to: recipient, ...r });
 }
 
-async function status(account: Address) {
+async function status(account: Address, agentIdArg?: string) {
   const router = addressArg(process.env.FILLMARK_ROUTER, "FILLMARK_ROUTER");
   const { pub } = clients();
-  const [agentId, wallet, maxSlipBps, expiry, installId, installed, maxPerTrade, dailyLimit, spentToday, day] =
+  const [cfgAgentId, wallet, maxSlipBps, perfFeeBps, expiry, installId, installed, maxPerTrade, dailyLimit, spentToday, day] =
     await pub.readContract({ address: router, abi: routerAbi, functionName: "configs", args: [account] });
+  // After uninstall the config is cleared: --agent-id reads that agent's book.
+  const agentId = agentIdArg !== undefined ? agentIdOf(agentIdArg) : cfgAgentId;
   const balances: Record<string, string> = {};
   for (const [sym, t] of Object.entries(TOKENS)) {
     const b = await pub.readContract({ address: t.address, abi: erc20Abi, functionName: "balanceOf", args: [account] });
@@ -329,6 +356,25 @@ async function status(account: Address) {
       worstFillBps: s.fills > 0 ? Number(s.worst) / 100 : null,
     };
   }
+  const book = await pub.readContract({ address: router, abi: routerAbi, functionName: "bookOf", args: [account, agentId] });
+  const positions: Record<string, unknown> = {};
+  for (const token of await pub.readContract({ address: router, abi: routerAbi, functionName: "tokensOf", args: [account, agentId] })) {
+    const sym = Object.keys(TOKENS).find((k) => TOKENS[k]!.address === getAddress(token)) ?? token;
+    const dec = TOKENS[sym]?.decimals ?? 18;
+    const [lot, pending, later, moved] = await pub.readContract({ address: router, abi: routerAbi, functionName: "positionOf", args: [account, agentId, token] });
+    const when = (t: bigint) => (t > 0n ? new Date(Number(t) * 1000).toISOString() : null);
+    positions[sym] = {
+      qty: formatUnits(lot.qty, dec),
+      costUsdg: formatUnits(lot.cost, 6),
+      gainInHoldUsdg: formatUnits(pending.gain, 6),
+      holdUntil: when(pending.until),
+      laterGainInHoldUsdg: formatUnits(later.gain, 6),
+      laterHoldUntil: when(later.until),
+      movedOutQty: formatUnits(moved.qty, dec),
+      movedOutGainUsdg: formatUnits(moved.gain, 6),
+      movedOutUntil: when(moved.until),
+    };
+  }
   out({
     account,
     owner: await accountOwner(account).catch(() => null),
@@ -337,13 +383,79 @@ async function status(account: Address) {
     agentWallet: wallet,
     installId,
     maxSlipBps,
+    perfFeeBps,
+    fillFeeBps: await pub.readContract({ address: router, abi: routerAbi, functionName: "fillFeeBps" }),
     expiry: new Date(Number(expiry) * 1000).toISOString(),
     maxPerTradeUsdg: formatUnits(maxPerTrade, 6),
     dailyLimitUsdg: formatUnits(dailyLimit, 6),
     spentTodayUsdg: day === (await pub.getBlock()).timestamp / 86_400n ? formatUnits(spentToday, 6) : "0",
     balances,
     assets,
+    book: {
+      realizedUsdg: formatUnits(book.realized, 6), // losses at once, gains after their hold
+      peakUsdg: formatUnits(book.peak, 6), // highest gain already charged
+      feesPaidUsdg: formatUnits(book.paid, 6),
+      debtUsdg: formatUnits(book.debt, 6),
+      perfFeeBps: book.perfFeeBps,
+      closing: book.closing, // removed: close-out books the rest
+    },
+    positions,
   });
+}
+
+function agentIdOf(v: string | undefined): bigint {
+  if (!v || !/^[0-9]{1,78}$/.test(v)) throw new Error(`--agent-id must be a number\n${USAGE}`);
+  return BigInt(v);
+}
+
+/// A plain transaction from the sending key to the router: settle and close-out are open
+/// to anyone, and move funds only between the client's account and the agent's wallet.
+async function routerTx(functionName: "settle" | "closeOut", args: readonly [Address] | readonly [Address, bigint]) {
+  const sender = senderKey();
+  const router = addressArg(process.env.FILLMARK_ROUTER, "FILLMARK_ROUTER");
+  const { pub, wallet } = clients(sender);
+  const { request, result } = await pub.simulateContract({ address: router, abi: routerAbi, functionName, args: args as any, account: sender });
+  const hash = await wallet!.writeContract(request);
+  const receipt = await pub.waitForTransactionReceipt({ hash });
+  if (receipt.status !== "success") throw new Error(`${functionName} tx ${hash} reverted`);
+  return { feeUsdg: formatUnits(result as bigint, 6), tx: hash };
+}
+
+async function settle(account: Address) {
+  const router = addressArg(process.env.FILLMARK_ROUTER, "FILLMARK_ROUTER");
+  const { pub } = clients();
+  const [agentId] = await pub.readContract({ address: router, abi: routerAbi, functionName: "configs", args: [account] });
+  const r = await routerTx("settle", [account]);
+  const book = await pub.readContract({ address: router, abi: routerAbi, functionName: "bookOf", args: [account, agentId] });
+  out({ account, agentId, ...r, debtUsdg: formatUnits(book.debt, 6) });
+}
+
+async function closeOut(account: Address, agentId: bigint) {
+  const router = addressArg(process.env.FILLMARK_ROUTER, "FILLMARK_ROUTER");
+  const r = await routerTx("closeOut", [account, agentId]);
+  const { pub } = clients();
+  const book = await pub.readContract({ address: router, abi: routerAbi, functionName: "bookOf", args: [account, agentId] });
+  out({ account, agentId, ...r, debtUsdg: formatUnits(book.debt, 6) });
+}
+
+/// Pays the whole debt to an agent: one batch from the account, approve then payDebt.
+async function payDebt(account: Address, agentId: bigint, sig?: Hex) {
+  const sender = senderKey();
+  const router = addressArg(process.env.FILLMARK_ROUTER, "FILLMARK_ROUTER");
+  const { pub } = clients();
+  const { debt } = await pub.readContract({ address: router, abi: routerAbi, functionName: "bookOf", args: [account, agentId] });
+  if (debt === 0n) throw new Error(`${account} owes agent ${agentId} nothing`);
+  const calls = [
+    { target: USDG, value: 0n, callData: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [router, debt] }) },
+    { target: router, value: 0n, callData: encodeFunctionData({ abi: routerAbi, functionName: "payDebt", args: [agentId, debt] }) },
+  ];
+  const batch = encodeAbiParameters(
+    [{ type: "tuple[]", components: [{ name: "target", type: "address" }, { name: "value", type: "uint256" }, { name: "callData", type: "bytes" }] }],
+    [calls],
+  );
+  const callData = encodeFunctionData({ abi: kernelAbi, functionName: "execute", args: [pad("0x01", { dir: "right", size: 32 }), batch] });
+  const r = await sendUserOp(sender, account, await accountOwner(account), callData, sig);
+  out({ account, agentId, debtUsdg: formatUnits(debt, 6), ...r });
 }
 
 async function main() {
@@ -355,6 +467,7 @@ async function main() {
       "daily-limit": { type: "string" },
       "expiry-days": { type: "string" },
       "max-slip-bps": { type: "string" },
+      "perf-fee-bps": { type: "string" },
       assets: { type: "string" },
       salt: { type: "string" },
       expiry: { type: "string" },
@@ -365,7 +478,7 @@ async function main() {
   });
   const [cmd, a1, a2, a3] = positionals;
   const sig = signatureArg(values.signature);
-  if (sig && !["install", "withdraw", "uninstall"].includes(cmd ?? "")) throw new Error(`--signature is not used by ${cmd}\n${USAGE}`);
+  if (sig && !["install", "withdraw", "uninstall", "pay-debt"].includes(cmd ?? "")) throw new Error(`--signature is not used by ${cmd}\n${USAGE}`);
   if (values.owner && cmd !== "create") throw new Error(`--owner is only for create\n${USAGE}`);
   switch (cmd) {
     case "create":
@@ -373,11 +486,17 @@ async function main() {
     case "install":
       return install(addressArg(a1, "account"), values, sig);
     case "status":
-      return status(addressArg(a1, "account"));
+      return status(addressArg(a1, "account"), values["agent-id"]);
     case "withdraw":
       return withdraw(addressArg(a1, "account"), a2, a3, values.to, sig);
     case "uninstall":
       return uninstall(addressArg(a1, "account"), sig);
+    case "settle":
+      return settle(addressArg(a1, "account"));
+    case "close-out":
+      return closeOut(addressArg(a1, "account"), agentIdOf(values["agent-id"]));
+    case "pay-debt":
+      return payDebt(addressArg(a1, "account"), agentIdOf(values["agent-id"]), sig);
     default:
       throw new Error(USAGE);
   }
@@ -385,7 +504,9 @@ async function main() {
 
 if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   main().catch((err) => {
-    console.error(revertName(err));
+    // Our own errors print in full (usage text included); viem errors only by their
+    // reason, since their message can carry the RPC URL.
+    console.error(err instanceof Error && !("shortMessage" in err) ? err.message : revertName(err));
     process.exit(1);
   });
 }

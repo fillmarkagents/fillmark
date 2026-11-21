@@ -1,19 +1,21 @@
-// Drives e2e/run.sh: the real deploy script, a registered agent, Kernel accounts made by
-// the CLI, agent runs that find their clients on chain (ETH reserve, a legacy-nonce buy,
-// round robin and the daily fill cap across restarts, daily limits, unfunded, expired,
-// hooked and non-Kernel accounts), then withdraw, a failing withdraw, uninstall and
-// reinstall, and an account owned by a wallet that only signs.
+// Drives e2e/run.sh: the real v2 deploy script next to the live v1 contracts, a registered
+// agent, Kernel accounts made by the CLI, agent runs that find their clients on chain (ETH
+// reserve, a buy already made on the v1 router the same day, round robin and the daily
+// fill cap across restarts, the fill fee, daily limits, unfunded, expired, hooked and
+// non-Kernel accounts), then withdraw, a failing withdraw, settle, close-out and pay-debt
+// refusals, uninstall (which closes the book) and reinstall, and an account owned by a
+// wallet that only signs.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createTestClient, encodeAbiParameters, erc20Abi, formatUnits, getAddress, hashTypedData, http, keccak256, pad, parseAbi, parseUnits, type Address, type Hex } from "viem";
+import { concat, createTestClient, encodeAbiParameters, encodeFunctionData, erc20Abi, formatUnits, getAddress, hashTypedData, http, keccak256, pad, parseAbi, parseUnits, zeroAddress, type Abi, type Address, type Hex } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { robinhood } from "viem/chains";
-import { DAY, buyNonce, legacyNonce } from "../src/agent.js";
+import { DAY, buyNonce } from "../src/agent.js";
 import { feedsAbi, routerAbi } from "../src/abi.generated.js";
-import { ASSETS, ECDSA_VALIDATOR, IDENTITY, SESSIONS, UNISWAP_FACTORY, USDG, clients, factoryAbi, identityAbi, poolAbi } from "../src/chain.js";
-import { intentDomain, intentTypes, signIntent, type FillIntent } from "../src/intent.js";
+import { ASSETS, ECDSA_VALIDATOR, IDENTITY, SESSIONS, UNISWAP_FACTORY, USDG, clients, factoryAbi, identityAbi, kernelAbi, poolAbi } from "../src/chain.js";
+import { intentDomain, intentTypes, type FillIntent } from "../src/intent.js";
 
 const rpc = process.env.FILLMARK_RPC!;
 const work = process.env.FILLMARK_E2E_DIR!;
@@ -67,41 +69,32 @@ for (const k of [deployer, agent, client]) {
 }
 
 const deployBlock = (await pub.getBlockNumber()) + 1n;
-step("deploy with script/Deploy.s.sol");
+step("deploy with script/DeployV2.s.sol");
 execFileSync(
   "forge",
-  ["script", "script/Deploy.s.sol", "--rpc-url", rpc, "--private-key", deployer.key, "--broadcast", "--slow"],
+  // Robinhood Chain allows contracts up to 98304 bytes (mainnet eth_call: "code size 98305
+  // limit 98304"); FillmarkRouterV2 is larger than Ethereum's 24 KiB, forge's default.
+  ["script", "script/DeployV2.s.sol", "--rpc-url", rpc, "--private-key", deployer.key, "--broadcast", "--slow", "--code-size-limit", "98304"],
   {
     cwd: root,
-    env: {
-      ...process.env,
-      FILLMARK_DEPLOYER: deployer.account.address,
-      FILLMARK_GUARDIAN: guardian,
-      FILLMARK_SAFE_OWNERS: safeOwners.join(","),
-      FOUNDRY_BROADCAST: join(work, "broadcast"),
-    },
+    env: { ...process.env, FILLMARK_DEPLOYER: deployer.account.address, FOUNDRY_BROADCAST: join(work, "broadcast") },
     stdio: "inherit",
   },
 );
-const run = JSON.parse(readFileSync(join(work, "broadcast/Deploy.s.sol/4663/run-latest.json"), "utf8"));
+const run = JSON.parse(readFileSync(join(work, "broadcast/DeployV2.s.sol/4663/run-latest.json"), "utf8"));
 const created = (name: string) => getAddress(run.transactions.find((t: any) => t.contractName === name && t.transactionType === "CREATE").contractAddress);
-const router = created("FillmarkRouter");
-const feeds = created("FillmarkFeeds");
-assert.equal(await pub.readContract({ address: router, abi: routerAbi, functionName: "feeds" }), feeds);
-// The deployer gave every timelock role to the Safe and kept none.
-const timelock = created("TimelockController");
-const timelockAbi = parseAbi([
-  "function PROPOSER_ROLE() view returns (bytes32)",
-  "function hasRole(bytes32, address) view returns (bool)",
-  "function getMinDelay() view returns (uint256)",
-]);
-const proposer = await pub.readContract({ address: timelock, abi: timelockAbi, functionName: "PROPOSER_ROLE" });
-assert.equal(await pub.readContract({ address: timelock, abi: timelockAbi, functionName: "hasRole", args: [proposer, deployer.account.address] }), false);
-assert.equal(await pub.readContract({ address: timelock, abi: timelockAbi, functionName: "getMinDelay" }), 2n * 86_400n);
+const router = created("FillmarkRouterV2");
+const burnerAddr = created("FillmarkBurner");
+// v2 runs next to the live v1 deployment: its feeds, and its timelock (owned by the Safe) as admin.
+const deployment = JSON.parse(readFileSync(join(root, "deployments/4663.json"), "utf8"));
+const liveRouter = getAddress(deployment.router);
+const feeds = await pub.readContract({ address: router, abi: routerAbi, functionName: "feeds" });
+const routerAdmin = await pub.readContract({ address: router, abi: routerAbi, functionName: "admin" });
+assert.equal(feeds, getAddress(deployment.feeds));
+assert.equal(routerAdmin, getAddress(deployment.timelock));
+assert.equal(await pub.readContract({ address: router, abi: routerAbi, functionName: "burner" }), burnerAddr);
+assert.equal(await pub.readContract({ address: router, abi: routerAbi, functionName: "fillFeeBps" }), 3);
 
-step("move past the calendar start (deploy time + 30 min)");
-await test.increaseTime({ seconds: 31 * 60 });
-await test.mine({ blocks: 1 });
 const now = (await pub.getBlock()).timestamp;
 const session = SESSIONS[await pub.readContract({ address: feeds, abi: feedsAbi, functionName: "sessionAt", args: [now] })];
 assert.notEqual(session, "Closed", "market is closed now; run e2e while US stocks trade (24/5)");
@@ -115,7 +108,7 @@ const agentId = reg.result;
 assert.equal(await pub.readContract({ address: IDENTITY, abi: identityAbi, functionName: "getAgentWallet", args: [agentId] }), agent.account.address);
 
 const env = { FILLMARK_RPC: rpc, FILLMARK_ROUTER: router, FILLMARK_KEY_FILE: client.path };
-const installFlags = ["--agent-id", String(agentId), "--max-per-trade", "50", "--daily-limit", "200", "--expiry-days", "30", "--max-slip-bps", "200", "--assets", "TSLA,NVDA,WETH,cbBTC"];
+const installFlags = ["--agent-id", String(agentId), "--max-per-trade", "50", "--daily-limit", "200", "--expiry-days", "30", "--max-slip-bps", "200", "--perf-fee-bps", "0", "--assets", "TSLA,NVDA,WETH,cbBTC"];
 const deal = (a: Address, usdg: string) => test.request({ method: "anvil_dealERC20" as any, params: [a, USDG, "0x" + parseUnits(usdg, 6).toString(16)] as any });
 
 step("cli create");
@@ -140,10 +133,10 @@ const statsOf = (token: Address, a: Address = account) => pub.readContract({ add
 const filled = (lines: { msg: string; [k: string]: unknown }[], a?: Address) => lines.filter((l) => l.msg === "filled" && (!a || l.account === a));
 const lastServed = (lines: { msg: string; [k: string]: unknown }[]) => lines.filter((l) => l.msg === "clients").at(-1)?.served;
 
-step("the live account's 19 Nov 2026 TSLA buy used the legacy nonce this agent also checks");
+step("the live v1 agent's 20 Nov 2026 TSLA buy for the live account used the nonce this agent checks on v1");
 const live = getAddress("0xB5667f1c68bADFc54CE5eaCc60EACb89473Ec37C");
-const liveRouter = getAddress("0xe542a7c8779962b8f819c4352d1436e08bc2d388");
-assert.equal(await pub.readContract({ address: liveRouter, abi: routerAbi, functionName: "nonceUsed", args: [live, legacyNonce(live, ASSETS.TSLA, 10_000_000n, 20_776n)] }), true);
+const v1Abi = JSON.parse(readFileSync(join(root, "out/FillmarkRouter.sol/FillmarkRouter.json"), "utf8")).abi as Abi;
+assert.equal(await pub.readContract({ address: liveRouter, abi: v1Abi, functionName: "nonceUsed", args: [live, buyNonce(live, ASSETS.TSLA, 20_777n)] }), true);
 
 // All agent runs below must fall in one UTC day: skip ahead if midnight is near.
 const toMidnight = DAY - ((await pub.getBlock()).timestamp % DAY);
@@ -169,9 +162,9 @@ const day = (await pub.getBlock()).timestamp / DAY;
 const writeConfig = (maxFillsPerDay: number) =>
   writeFileSync(
     config,
-    JSON.stringify({ router, agentId: String(agentId), keyFile: agent.path, deployBlock: String(deployBlock), maxFillsPerDay, legacyNonceUntilDay: String(day), allowExtended: true }),
+    JSON.stringify({ router, agentId: String(agentId), keyFile: agent.path, deployBlock: String(deployBlock), maxFillsPerDay, previousRouter: liveRouter, previousRouterUntilDay: String(day), allowExtended: true }),
   );
-writeConfig(4);
+writeConfig(3);
 
 step("below the ETH reserve the agent sends nothing");
 await test.setBalance({ address: agent.account.address, value: 10n ** 12n });
@@ -180,22 +173,40 @@ assert.equal(filled(l0).length, 0, JSON.stringify(l0));
 assert.ok(l0.some((l) => l.msg === "agent ETH below the reserve, no fills until it is topped up"), JSON.stringify(l0));
 await test.setBalance({ address: agent.account.address, value: 10n ** 18n });
 
-step("a TSLA buy for A under the plan-based agent's nonce, as the old agent sent it");
+step("A also on the live v1 router, which buys its TSLA today under the same nonce, as the v1 agent does");
+// A moves from v1 the way a client does: the account itself installs and later removes
+// the v1 router (Kernel lets the account call its own module functions).
+await test.impersonateAccount({ address: account });
+await test.setBalance({ address: account, value: 10n ** 18n });
+const asAccount = (data: Hex) => test.sendUnsignedTransaction({ from: account, to: account, data });
+const v1Install = encodeAbiParameters(
+  [{ type: "uint256" }, { type: "uint128" }, { type: "uint128" }, { type: "uint64" }, { type: "uint16" }, { type: "address[]" }],
+  [agentId, 50_000_000n, 200_000_000n, (await pub.getBlock()).timestamp + 86_400n, 200, [ASSETS.TSLA]],
+);
+const moduleData = (data: Hex) => concat([zeroAddress, encodeAbiParameters([{ type: "bytes" }, { type: "bytes" }], [data, "0x"])]);
+await pub.waitForTransactionReceipt({ hash: await asAccount(encodeFunctionData({ abi: kernelAbi, functionName: "installModule", args: [2n, liveRouter, moduleData(v1Install)] })) });
+const v1Cfg = (await pub.readContract({ address: liveRouter, abi: v1Abi, functionName: "configs", args: [account] })) as readonly unknown[];
+assert.equal(v1Cfg[5], true);
 const tslaPool = await pub.readContract({ address: UNISWAP_FACTORY, abi: factoryAbi, functionName: "getPool", args: [USDG, ASSETS.TSLA, 500] });
 const [sqrtTsla] = await pub.readContract({ address: tslaPool, abi: poolAbi, functionName: "slot0" });
-const cfgA = await pub.readContract({ address: router, abi: routerAbi, functionName: "configs", args: [account] });
-const legacyIt: FillIntent = {
-  agentId, account, installId: cfgA[4], tokenIn: USDG, tokenOut: ASSETS.TSLA, fee: 500, amountIn: 50_000_000n, minOut: 1n,
-  refSqrtPriceX96: sqrtTsla, maxDevBps: 50, sqrtPriceLimitX96: 0n, nonce: legacyNonce(account, ASSETS.TSLA, 50_000_000n, day),
+const v1It: FillIntent = {
+  agentId, account, installId: v1Cfg[4] as bigint, tokenIn: USDG, tokenOut: ASSETS.TSLA, fee: 500, amountIn: 50_000_000n, minOut: 1n,
+  refSqrtPriceX96: sqrtTsla, maxDevBps: 50, sqrtPriceLimitX96: 0n, nonce: buyNonce(account, ASSETS.TSLA, day),
   deadline: (await pub.getBlock()).timestamp + 300n,
 };
-const legacySim = await pub.simulateContract({
-  address: router, abi: routerAbi, functionName: "execute", args: [legacyIt, await signIntent(agent.account, router, 4663, legacyIt)], account: agent.account,
+const v1Sig = await agent.account.signTypedData({
+  domain: { name: "Fillmark", version: "1", chainId: 4663, verifyingContract: liveRouter },
+  types: intentTypes,
+  primaryType: "FillIntent",
+  message: v1It,
 });
-await pub.waitForTransactionReceipt({ hash: await agentWallet.writeContract(legacySim.request) });
-assert.equal((await statsOf(ASSETS.TSLA)).fills, 1);
+const v1Sim = await pub.simulateContract({ address: liveRouter, abi: v1Abi, functionName: "execute", args: [v1It, v1Sig], account: agent.account });
+await pub.waitForTransactionReceipt({ hash: await agentWallet.writeContract(v1Sim.request as any) });
+await pub.waitForTransactionReceipt({ hash: await asAccount(encodeFunctionData({ abi: kernelAbi, functionName: "uninstallModule", args: [2n, liveRouter, "0x"] })) });
+await test.stopImpersonatingAccount({ address: account });
+assert.equal(await usdgOf(account), parseUnits("950", 6)); // v1 has no fill fee
 
-step("agent run 1 with a cap of 4 fills a day, round robin: A's NVDA, then B's NVDA and TSLA, then the cap");
+step("agent run 1 with a cap of 3 fills a day, round robin: not A's TSLA (bought on v1), A's NVDA, then B's NVDA and TSLA, then the cap");
 const l1 = runAgent(config);
 const assetsOf = (lines: { msg: string; [k: string]: unknown }[], a: Address) => filled(lines, a).map((l) => l.asset).sort();
 assert.deepEqual(assetsOf(l1, account), ["NVDA"], JSON.stringify(l1));
@@ -216,9 +227,13 @@ assert.deepEqual(assetsOf(l2, account), ["WETH", "cbBTC"], JSON.stringify(l2));
 assert.equal(filled(l2).length, 2, JSON.stringify(l2));
 assert.equal(lastServed(l2), 2, JSON.stringify(l2));
 assert.ok(l2.some((l) => l.msg === "daily limit reached" && l.account === accountB), JSON.stringify(l2));
-for (const t of ["TSLA", "NVDA", "WETH", "cbBTC"]) assert.equal((await statsOf(ASSETS[t])).fills, 1, t);
-assert.equal(await usdgOf(account), parseUnits("800", 6));
-assert.equal(await usdgOf(accountB), parseUnits("940", 6));
+assert.equal((await statsOf(ASSETS.TSLA)).fills, 0); // bought on v1
+for (const t of ["NVDA", "WETH", "cbBTC"]) assert.equal((await statsOf(ASSETS[t])).fills, 1, t);
+for (const f of [...filled(l1), ...filled(l2)]) assert.equal(BigInt(f.fillFee as string), (BigInt(f.usdg as string) * 3n) / 10_000n);
+// Each buy pays its amount plus 3 bps to the burner.
+assert.equal(await usdgOf(account), parseUnits("799.955", 6));
+assert.equal(await usdgOf(accountB), parseUnits("939.982", 6));
+assert.equal(await usdgOf(burnerAddr), parseUnits("0.063", 6));
 assert.equal(await pub.readContract({ address: REPUTATION, abi: reputationAbi, functionName: "getLastIndex", args: [agentId, account] }), 8n);
 for (const t of ["NVDA", "WETH", "cbBTC"]) {
   const used = await pub.readContract({ address: router, abi: routerAbi, functionName: "nonceUsed", args: [account, buyNonce(account, ASSETS[t], day)] });
@@ -228,7 +243,7 @@ for (const t of ["NVDA", "WETH", "cbBTC"]) {
 step("agent run 3 the same day: nothing happens");
 const l3 = runAgent(config);
 assert.equal(filled(l3).length, 0, JSON.stringify(l3));
-assert.equal((await statsOf(ASSETS.TSLA)).fills, 1);
+assert.equal((await statsOf(ASSETS.TSLA)).fills, 0);
 
 step("a Kernel account with an executor hook, or on another implementation, is never traded");
 const cD = cli(env, "create", ...installFlags, "--salt", "4");
@@ -240,9 +255,9 @@ const hookSlot = keccak256(encodeAbiParameters([{ type: "address" }, { type: "by
 const IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
 const word = (a: Address) => pad(a, { size: 32 });
 assert.equal(await pub.getStorageAt({ address: accountD, slot: hookSlot }), word("0x0000000000000000000000000000000000000001"));
-const burner = privateKeyToAccount(generatePrivateKey()).address;
-await test.setCode({ address: burner, bytecode: "0x5b600056" }); // loops until out of gas
-for (const [slot, value] of [[hookSlot, word(burner)], [IMPL_SLOT, word(ECDSA_VALIDATOR)]] as const) {
+const looper = privateKeyToAccount(generatePrivateKey()).address;
+await test.setCode({ address: looper, bytecode: "0x5b600056" }); // loops until out of gas
+for (const [slot, value] of [[hookSlot, word(looper)], [IMPL_SLOT, word(ECDSA_VALIDATOR)]] as const) {
   const before = await pub.getStorageAt({ address: accountD, slot });
   await test.setStorageAt({ address: accountD, index: slot, value });
   const lD = runAgent(config);
@@ -258,8 +273,8 @@ const eoa = keyFile("eoa");
 await test.setBalance({ address: eoa.account.address, value: 10n ** 18n });
 const eoaWallet = clients(eoa.account).wallet!;
 const eoaInit = encodeAbiParameters(
-  [{ type: "uint256" }, { type: "uint128" }, { type: "uint128" }, { type: "uint64" }, { type: "uint16" }, { type: "address[]" }],
-  [agentId, 50_000_000n, 200_000_000n, (await pub.getBlock()).timestamp + 86_400n, 200, [ASSETS.WETH]],
+  [{ type: "uint256" }, { type: "uint128" }, { type: "uint128" }, { type: "uint64" }, { type: "uint16" }, { type: "uint16" }, { type: "address[]" }],
+  [agentId, 50_000_000n, 200_000_000n, (await pub.getBlock()).timestamp + 86_400n, 200, 0, [ASSETS.WETH]],
 );
 await pub.waitForTransactionReceipt({ hash: await eoaWallet.writeContract({ address: router, abi: routerAbi, functionName: "onInstall", args: [eoaInit] }) });
 await deal(eoa.account.address, "1000");
@@ -271,6 +286,9 @@ await pub.waitForTransactionReceipt({ hash: await eoaWallet.writeContract({ addr
 step("B reinstalls with other limits the same day: assets bought today are not bought again");
 const ub = cli(env, "uninstall", accountB);
 assert.equal(ub.code, 0, ub.err);
+const ubOut = JSON.parse(ub.out);
+assert.equal(ubOut.bookClosed, true, ub.out); // prices were fresh: closed at this NAV
+assert.equal(ubOut.debtUsdg, "0");
 const ib = cli(env, "install", accountB, ...installFlags.map((f, k) => (installFlags[k - 1] === "--max-per-trade" ? "20" : installFlags[k - 1] === "--daily-limit" ? "100" : f)));
 assert.equal(ib.code, 0, ib.err);
 const lB = runAgent(config);
@@ -294,7 +312,12 @@ const s = cli(env, "status", account);
 assert.equal(s.code, 0, s.err);
 const st = JSON.parse(s.out);
 assert.equal(st.installed, true);
-assert.equal(st.assets.TSLA.fills, 1);
+assert.equal(st.perfFeeBps, 0);
+assert.equal(st.fillFeeBps, 3);
+assert.equal(st.book.debtUsdg, "0");
+assert.equal(st.book.closing, false);
+assert.deepEqual(Object.keys(st.positions).sort(), ["NVDA", "WETH", "cbBTC"]);
+assert.equal(st.assets.TSLA.fills, 0);
 assert.equal(st.assets.WETH.fills, 1);
 assert.equal(st.assets.cbBTC.fills, 1);
 console.log(`   cost vs NAV: TSLA ${st.assets.TSLA.costBps} bps, NVDA ${st.assets.NVDA.costBps} bps, WETH ${st.assets.WETH.costBps} bps, cbBTC ${st.assets.cbBTC.costBps} bps`);
@@ -320,11 +343,26 @@ step("cli withdraw more USDG than the account holds fails and says so");
 const bad = cli(env, "withdraw", account, "USDG", "100000");
 assert.equal(bad.code, 1);
 assert.match(bad.err, /user operation failed/);
-assert.equal(await usdgOf(account), parseUnits("800", 6));
+assert.equal(await usdgOf(account), parseUnits("799.955", 6));
+
+step("cli settle: nothing is due (the agent only buys)");
+const se = cli(env, "settle", accountB);
+assert.equal(se.code, 0, se.err);
+assert.equal(JSON.parse(se.out).feeUsdg, "0");
+assert.equal(JSON.parse(se.out).debtUsdg, "0");
+
+step("cli pay-debt with nothing owed, and close-out of an installed account, are refused");
+const pd = cli(env, "pay-debt", account, "--agent-id", String(agentId));
+assert.equal(pd.code, 1);
+assert.match(pd.err, /owes agent .* nothing/);
+const co = cli(env, "close-out", account, "--agent-id", String(agentId));
+assert.equal(co.code, 1);
+assert.match(co.err, /NotClosing/);
 
 step("cli uninstall stops the agent");
 const u = cli(env, "uninstall", account);
 assert.equal(u.code, 0, u.err);
+assert.equal(JSON.parse(u.out).bookClosed, true, u.out);
 assert.equal(await pub.readContract({ address: router, abi: routerAbi, functionName: "isInitialized", args: [account] }), false);
 const l6 = runAgent(config);
 assert.equal(filled(l6).length, 0, JSON.stringify(l6));
@@ -338,8 +376,8 @@ step("cli install again");
 const i = cli(env, "install", account, ...installFlags);
 assert.equal(i.code, 0, i.err);
 const cfg = await pub.readContract({ address: router, abi: routerAbi, functionName: "configs", args: [account] });
-assert.equal(cfg[5], true);
-assert.equal(cfg[4], 2n);
+assert.equal(cfg[6], true); // installed
+assert.equal(cfg[5], 2n); // installId
 
 step("cli create with a wallet owner: the sending key only pays");
 const ext = privateKeyToAccount(generatePrivateKey());
@@ -407,7 +445,7 @@ const flagsAt = installFlags.flatMap((f, k) => (f === "--expiry-days" ? ["--expi
 const i2 = cli(env, "install", account2, ...flagsAt, "--signature", await ext.signMessage({ message: { raw: ip.userOpHash } }));
 assert.equal(i2.code, 0, i2.err);
 const cfg2 = await pub.readContract({ address: router, abi: routerAbi, functionName: "configs", args: [account2] });
-assert.equal(cfg2[5], true);
-assert.equal(cfg2[3], BigInt(ip.expiry));
+assert.equal(cfg2[6], true); // installed
+assert.equal(cfg2[4], BigInt(ip.expiry));
 
 console.log("E2E OK");

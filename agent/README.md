@@ -1,10 +1,12 @@
 # Fillmark reference agent and client CLI
 
-TypeScript (viem) tools for FillmarkRouter on Robinhood Chain (4663).
+TypeScript (viem) tools for FillmarkRouterV2 on Robinhood Chain (4663).
 
 - `src/agent.ts`: DCA agent. It finds its clients on chain: every account whose router
   config names this agent (found through the router's `Installed` events from
-  `deployBlock`), is not expired, and holds at least one trade's USDG. Once per UTC day,
+  `deployBlock`), is not expired, owes this agent no fees, installed it with a performance
+  fee of at least `minPerfFeeBps` (default 0), and holds at least one trade's USDG plus
+  the router's fill fee (3 bps, sent to the burner). Once per UTC day,
   for each asset the client allowed, it buys the client's per-trade limit, while the
   daily limit and the balance allow it. At most `maxFillsPerDay` (default 300) buys are
   sent per day across all clients, counted from the router's `Filled` events so the cap
@@ -23,13 +25,19 @@ TypeScript (viem) tools for FillmarkRouter on Robinhood Chain (4663).
   and the day's nonce, and expires at the end of that UTC day, so at most one fills, on
   that day. The nonce comes from the account, asset and day, so retries, restarts and a
   client changing its limits cannot buy the same asset twice in one day; up to
-  `legacyNonceUntilDay` a buy under the earlier plan-based nonce also counts. Quotes and
+  `previousRouterUntilDay` a buy under the same nonce on `previousRouter` (the v1 router
+  clients move from) also counts, so the day a client moves never buys twice. The agent
+  only buys, so it never realizes a gain and never charges a performance fee. Quotes and
   fills stop at `maxSlipBps` above the pool's spot price, which is stricter than the
   router's NAV bound: a buy too large for the pool depth inside that range never fills,
   is logged once as "no fee tier can fill" and is tried again every 15 minutes. Config:
   see `agent.example.json`.
 - `src/cli.ts`: client tool. `create` makes a Kernel v3.1 account with the router
-  installed; `status`, `withdraw`, `uninstall` and `install` work on it. User operations
+  installed (`--perf-fee-bps` is the agent's share of net realized gains, its terms);
+  `status`, `withdraw`, `uninstall` and `install` work on it. `uninstall` closes the
+  agent's book at the NAV of that moment when every token can be priced; otherwise
+  `close-out` does it once prices are back. `settle` charges a due performance fee, and
+  `pay-debt` pays fees owed to an agent that was removed. User operations
   are hashed locally (chain 4663, EntryPoint v0.7) and sent to the EntryPoint by the key
   in `FILLMARK_KEY_FILE` with zero gas fees, so no bundler is needed and the account needs
   no ETH. By default that key is also the owner and signs. With `--owner`, `create` makes

@@ -1,12 +1,13 @@
 // Fillmark reference agent: dollar-cost averaging for every client account that installed
-// this agent on the router. Clients and their limits are read from chain: once per UTC
+// this agent on router v2. Clients and their limits are read from chain: once per UTC
 // day, for each asset the client allowed, the agent buys the client's per-trade limit in
-// USDG, while the daily limit, the USDG balance and the router allow it. Stocks trade in
-// the regular session only (unless allowExtended), crypto at any hour. Every fee tier is
-// quoted with Uniswap's QuoterV2, and the best one the router accepts in simulation is
-// sent. The nonce is derived from the account, asset and day, and an intent expires at
-// the end of its day, so a restart, a retry or a client changing its limits can never buy
-// the same asset twice in one day.
+// USDG, while the daily limit, the USDG balance (per-trade limit plus the router's fill
+// fee) and the router allow it. Stocks trade in the regular session only (unless
+// allowExtended), crypto at any hour. Every fee tier is quoted with Uniswap's QuoterV2,
+// and the best one the router accepts in simulation is sent. The nonce is derived from
+// the account, asset and day, and an intent expires at the end of its day, so a restart,
+// a retry or a client changing its limits can never buy the same asset twice in one day.
+// The agent only buys, so it never realizes a gain and never charges a performance fee.
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -53,17 +54,18 @@ const MIN_NOTIONAL = 10_000_000n; // FillmarkRouter.MIN_NOTIONAL, 10 USDG
 const LOG_CHUNK = 5_000_000n;
 const RESCAN = 200n; // blocks scanned again each tick, for a lagging node or a reorg
 const RETRY_SEC = 900n;
-const GAS_CAP = 1_200_000n; // live fills use 0.58M to 0.63M
+const GAS_CAP = 1_200_000n; // v2 fills use about 0.63M (sale) to 0.85M (first buy of a token) in fork tests
 const BATCH = 32_768; // multicall calldata bytes per eth_call
 // Solady's ERC1967 proxy, the runtime code of every Kernel account the factory deploys.
 const PROXY_CODE: Hex = "0x363d3d373d3d363d7f360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc545af43d6000803e6038573d6000fd5b3d6000f3";
 const IMPL_SLOT: Hex = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
 const NO_HOOK = getAddress("0x0000000000000000000000000000000000000001");
 const kernelHookAbi = parseAbi(["function executorConfig(address executor) view returns (address hook)"]);
+const nonceAbi = parseAbi(["function nonceUsed(address, uint256) view returns (bool)"]);
 
 const CONFIG_KEYS = new Set([
-  "router", "agentId", "keyFile", "deployBlock", "maxFillsPerDay", "minEth", "legacyNonceUntilDay",
-  "tickSec", "maxDevBps", "minOutBufferBps", "deadlineSec", "allowExtended",
+  "router", "agentId", "keyFile", "deployBlock", "maxFillsPerDay", "minEth", "previousRouter",
+  "previousRouterUntilDay", "minPerfFeeBps", "tickSec", "maxDevBps", "minOutBufferBps", "deadlineSec", "allowExtended",
 ]);
 
 export type Config = {
@@ -73,7 +75,9 @@ export type Config = {
   deployBlock: bigint; // the router's deploy block: where client discovery starts
   maxFillsPerDay: number; // across all clients, so one day's gas is bounded
   minEthWei: bigint; // below this the agent stops sending fills
-  legacyNonceUntilDay: bigint; // last UTC day on which the plan-based agent may have bought
+  previousRouter: Address; // the router clients move from (zero if none)
+  previousRouterUntilDay: bigint; // up to this UTC day a buy there counts as that day's buy
+  minPerfFeeBps: number; // clients who installed with a lower performance fee are not served
   tickSec: number;
   maxDevBps: number; // pool price may move this much between quote and fill
   minOutBufferBps: number; // minOut sits this far below the simulated output
@@ -85,6 +89,8 @@ export function loadConfig(path: string): Config {
   const raw = JSON.parse(readFileSync(path, "utf8"));
   for (const k of Object.keys(raw)) if (!CONFIG_KEYS.has(k)) throw new Error(`config.${k} is not a known setting`);
   if (!isAddress(raw.router)) throw new Error("config.router is not an address");
+  const previous = raw.previousRouter ?? zeroAddress;
+  if (!isAddress(previous)) throw new Error("config.previousRouter is not an address");
   const uint = (name: string, def?: string) => {
     const v = String(raw[name] ?? def);
     if (!/^\d+$/.test(v)) throw new Error(`config.${name} must be a non-negative integer`);
@@ -102,7 +108,9 @@ export function loadConfig(path: string): Config {
     deployBlock: uint("deployBlock"),
     maxFillsPerDay: int("maxFillsPerDay", 300, 1, 10_000),
     minEthWei: parseEther(String(raw.minEth ?? "0.0005")),
-    legacyNonceUntilDay: uint("legacyNonceUntilDay", "0"),
+    previousRouter: getAddress(previous),
+    previousRouterUntilDay: uint("previousRouterUntilDay", "0"),
+    minPerfFeeBps: int("minPerfFeeBps", 0, 0, 3000),
     tickSec: int("tickSec", 60, 5, 3600),
     maxDevBps: int("maxDevBps", 50, 1, 1000),
     minOutBufferBps: int("minOutBufferBps", 30, 0, 1000),
@@ -130,22 +138,13 @@ function sqrt(n: bigint): bigint {
   return x;
 }
 
-/// One nonce per account, asset and UTC day.
+/// One nonce per account, asset and UTC day. The v1 agent used the same nonce on the v1
+/// router, so up to previousRouterUntilDay a buy there also counts as that day's buy and
+/// the day a client moves to v2 never buys twice.
 export function buyNonce(account: Address, token: Address, day: bigint): bigint {
   const encoded = encodeAbiParameters(
     [{ type: "string" }, { type: "address" }, { type: "address" }, { type: "uint256" }],
     ["fillmark-dca-v2", account, token, day],
-  );
-  return BigInt(keccak256(encoded));
-}
-
-/// The nonce the earlier plan-based agent used for a daily plan of amountIn. Up to
-/// legacyNonceUntilDay a buy under it also counts as that day's buy, so the day of the
-/// switch never buys twice.
-export function legacyNonce(account: Address, token: Address, amountIn: bigint, day: bigint): bigint {
-  const encoded = encodeAbiParameters(
-    [{ type: "string" }, { type: "address" }, { type: "address" }, { type: "uint256" }, { type: "uint256" }, { type: "uint256" }],
-    ["fillmark-dca-v1", account, token, amountIn, DAY, day],
   );
   return BigInt(keccak256(encoded));
 }
@@ -155,6 +154,7 @@ type Client = {
   installId: bigint;
   maxSlipBps: number;
   maxPerTrade: bigint;
+  fillFee: bigint; // USDG the router sends to the burner on a buy of maxPerTrade
   dailyLimit: bigint;
   spent: bigint; // spent today, as the router counts it
   balance: bigint; // USDG
@@ -295,21 +295,25 @@ export class Agent {
     const { router, agentId } = this.cfg;
     if (this.candidates.length === 0) return [];
     const list = [...this.candidates];
+    // The fill fee can change (timelock only), so it is read each tick.
+    const fillFeeBps = BigInt(await this.pub.readContract({ address: router, abi: routerAbi, functionName: "fillFeeBps" }));
     const reads = await this.pub.multicall({
       allowFailure: false,
       batchSize: BATCH,
       contracts: list.flatMap((account) => [
         { address: router, abi: routerAbi, functionName: "configs", args: [account] } as const,
         { address: USDG, abi: erc20Abi, functionName: "balanceOf", args: [account] } as const,
+        { address: router, abi: routerAbi, functionName: "bookOf", args: [account, agentId] } as const,
       ]),
     });
     const day = now / DAY;
     const served: Client[] = [];
     list.forEach((account, i) => {
-      const [id, wallet, maxSlipBps, expiry, installId, installed, maxPerTrade, dailyLimit, spentToday, cDay] = reads[2 * i] as readonly [
-        bigint, Address, number, bigint, bigint, boolean, bigint, bigint, bigint, bigint,
+      const [id, wallet, maxSlipBps, perfFeeBps, expiry, installId, installed, maxPerTrade, dailyLimit, spentToday, cDay] = reads[3 * i] as readonly [
+        bigint, Address, number, number, bigint, bigint, boolean, bigint, bigint, bigint, bigint,
       ];
-      const balance = reads[2 * i + 1] as bigint;
+      const balance = reads[3 * i + 1] as bigint;
+      const { debt } = reads[3 * i + 2] as { debt: bigint };
       if (!installed || id !== agentId || wallet !== this.key.address || expiry <= now) {
         // A fresh install may not be visible yet on the node that answered: drop only
         // accounts whose last install is older than the rescanned overlap.
@@ -320,9 +324,19 @@ export class Agent {
         }
         return;
       }
-      if (maxPerTrade < MIN_NOTIONAL || dailyLimit < maxPerTrade || balance < maxPerTrade) return;
+      const fillFee = (maxPerTrade * fillFeeBps) / 10_000n;
+      if (maxPerTrade < MIN_NOTIONAL || dailyLimit < maxPerTrade || balance < maxPerTrade + fillFee) return;
       if (this.banned.has(`${day}:${account}`)) return;
-      served.push({ account, installId, maxSlipBps, maxPerTrade, dailyLimit, spent: cDay === day ? spentToday : 0n, balance });
+      if (perfFeeBps < this.cfg.minPerfFeeBps) {
+        this.once("day", `perf:${account}`, "info", "installed with a lower performance fee than this agent asks, not served", { account, perfFeeBps });
+        return;
+      }
+      if (debt > 0n) {
+        // The router rejects every buy (InDebt) until a sale or the client pays it.
+        this.once("day", `debt:${account}`, "info", "account owes this agent fees, no buys", { account, debt });
+        return;
+      }
+      served.push({ account, installId, maxSlipBps, maxPerTrade, fillFee, dailyLimit, spent: cDay === day ? spentToday : 0n, balance });
     });
     const key = served.map((c) => c.account).join(",");
     if (key !== this.servedKey) {
@@ -429,14 +443,15 @@ export class Agent {
     const todo = pairs.filter((t) => tradable.has(t.token));
     if (todo.length === 0) return;
 
-    const legacy = day <= this.cfg.legacyNonceUntilDay;
-    const per = legacy ? 2 : 1;
+    const previous = this.cfg.previousRouter !== zeroAddress && day <= this.cfg.previousRouterUntilDay;
+    const per = previous ? 2 : 1;
     const used = await this.pub.multicall({
       allowFailure: false,
       batchSize: BATCH,
       contracts: todo.flatMap((t) => {
-        const calls = [{ address: this.cfg.router, abi: routerAbi, functionName: "nonceUsed", args: [t.c.account, buyNonce(t.c.account, t.token, day)] } as const];
-        if (legacy) calls.push({ address: this.cfg.router, abi: routerAbi, functionName: "nonceUsed", args: [t.c.account, legacyNonce(t.c.account, t.token, t.c.maxPerTrade, day)] } as const);
+        const nonce = buyNonce(t.c.account, t.token, day);
+        const calls = [{ address: this.cfg.router, abi: nonceAbi, functionName: "nonceUsed", args: [t.c.account, nonce] } as const];
+        if (previous) calls.push({ address: this.cfg.previousRouter, abi: nonceAbi, functionName: "nonceUsed", args: [t.c.account, nonce] } as const);
         return calls;
       }),
     });
@@ -468,7 +483,7 @@ export class Agent {
         this.once("day", `limit:${t.key}`, "info", "daily limit reached", { account: c.account, asset: TICKER[t.token] });
         continue;
       }
-      if (c.balance < c.maxPerTrade) {
+      if (c.balance < c.maxPerTrade + c.fillFee) {
         this.once("day", `funds:${t.key}`, "info", "not enough USDG for another buy today", { account: c.account, asset: TICKER[t.token] });
         continue;
       }
@@ -487,7 +502,7 @@ export class Agent {
         if (r === "filled") {
           this.done.add(t.key);
           c.spent += c.maxPerTrade;
-          c.balance -= c.maxPerTrade;
+          c.balance -= c.maxPerTrade + c.fillFee;
           continue;
         }
         if (r === "skip") continue;
@@ -594,6 +609,7 @@ export class Agent {
         asset,
         fee: it.fee,
         usdg: filled.args.fill.usdgAmount,
+        fillFee: filled.args.fill.fillFee,
         assetAmount: filled.args.fill.stockAmount,
         nav: filled.args.prices.nav,
         fillPrice: filled.args.prices.fill,

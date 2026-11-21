@@ -28,9 +28,42 @@ export const routerAbi = [
         "name": "feeds_",
         "type": "address",
         "internalType": "contract FillmarkFeeds"
+      },
+      {
+        "name": "burner_",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "admin_",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "fillFeeBps_",
+        "type": "uint16",
+        "internalType": "uint16"
+      },
+      {
+        "name": "hold_",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "FEEDBACK_GAS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -41,6 +74,45 @@ export const routerAbi = [
         "name": "",
         "type": "bytes32",
         "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_FILL_FEE_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_HOLD",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_PERF_FEE_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
       }
     ],
     "stateMutability": "view"
@@ -60,7 +132,46 @@ export const routerAbi = [
   },
   {
     "type": "function",
+    "name": "MIN_HOLD",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "MIN_NOTIONAL",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "PAY_GAS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "STUCK_AFTER",
     "inputs": [],
     "outputs": [
       {
@@ -86,6 +197,85 @@ export const routerAbi = [
   },
   {
     "type": "function",
+    "name": "admin",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "bookOf",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "agentId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct FillmarkRouterV2.Book",
+        "components": [
+          {
+            "name": "realized",
+            "type": "int128",
+            "internalType": "int128"
+          },
+          {
+            "name": "peak",
+            "type": "int128",
+            "internalType": "int128"
+          },
+          {
+            "name": "debt",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "paid",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "wallet",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "perfFeeBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "closing",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "closingAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "bucketOf",
     "inputs": [
       {
@@ -102,6 +292,43 @@ export const routerAbi = [
       }
     ],
     "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "burner",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "closeOut",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "agentId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "fee",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -126,6 +353,11 @@ export const routerAbi = [
       },
       {
         "name": "maxSlipBps",
+        "type": "uint16",
+        "internalType": "uint16"
+      },
+      {
+        "name": "perfFeeBps",
         "type": "uint16",
         "internalType": "uint16"
       },
@@ -217,7 +449,7 @@ export const routerAbi = [
       {
         "name": "it",
         "type": "tuple",
-        "internalType": "struct FillmarkRouter.FillIntent",
+        "internalType": "struct FillmarkRouterV2.FillIntent",
         "components": [
           {
             "name": "agentId",
@@ -329,12 +561,25 @@ export const routerAbi = [
   },
   {
     "type": "function",
+    "name": "fillFeeBps",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "hashIntent",
     "inputs": [
       {
         "name": "it",
         "type": "tuple",
-        "internalType": "struct FillmarkRouter.FillIntent",
+        "internalType": "struct FillmarkRouterV2.FillIntent",
         "components": [
           {
             "name": "agentId",
@@ -415,6 +660,19 @@ export const routerAbi = [
   },
   {
     "type": "function",
+    "name": "hold",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "identity",
     "inputs": [],
     "outputs": [
@@ -484,6 +742,59 @@ export const routerAbi = [
         "name": "",
         "type": "bool",
         "internalType": "bool"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "keyOf",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "agentId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "navValueCeil",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "price",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "stockDecimals",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "pure"
@@ -569,12 +880,185 @@ export const routerAbi = [
   },
   {
     "type": "function",
+    "name": "openBook",
+    "inputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "payDebt",
+    "inputs": [
+      {
+        "name": "agentId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "positionOf",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "agentId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "stock",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "lot",
+        "type": "tuple",
+        "internalType": "struct FillmarkRouterV2.Lot",
+        "components": [
+          {
+            "name": "qty",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "cost",
+            "type": "uint128",
+            "internalType": "uint128"
+          }
+        ]
+      },
+      {
+        "name": "pending",
+        "type": "tuple",
+        "internalType": "struct FillmarkRouterV2.Hold",
+        "components": [
+          {
+            "name": "gain",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "qty",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "until",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      },
+      {
+        "name": "later",
+        "type": "tuple",
+        "internalType": "struct FillmarkRouterV2.Hold",
+        "components": [
+          {
+            "name": "gain",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "qty",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "until",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      },
+      {
+        "name": "movedOut",
+        "type": "tuple",
+        "internalType": "struct FillmarkRouterV2.Out",
+        "components": [
+          {
+            "name": "qty",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "gain",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "loss",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "until",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "priceOf",
+    "inputs": [
+      {
+        "name": "stock",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "answer",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "decimals",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "pricesOf",
     "inputs": [
       {
         "name": "f",
         "type": "tuple",
-        "internalType": "struct FillmarkRouter.Fill",
+        "internalType": "struct FillmarkRouterV2.Fill",
         "components": [
           {
             "name": "agentId",
@@ -603,6 +1087,11 @@ export const routerAbi = [
           },
           {
             "name": "stockAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "fillFee",
             "type": "uint256",
             "internalType": "uint256"
           },
@@ -643,7 +1132,7 @@ export const routerAbi = [
       {
         "name": "p",
         "type": "tuple",
-        "internalType": "struct FillmarkRouter.Prices",
+        "internalType": "struct FillmarkRouterV2.Prices",
         "components": [
           {
             "name": "nav",
@@ -697,6 +1186,38 @@ export const routerAbi = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "setFillFeeBps",
+    "inputs": [
+      {
+        "name": "bps",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "settle",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "fee",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -824,7 +1345,7 @@ export const routerAbi = [
       {
         "name": "s",
         "type": "tuple",
-        "internalType": "struct FillmarkRouter.Stats",
+        "internalType": "struct FillmarkRouterV2.Stats",
         "components": [
           {
             "name": "fills",
@@ -847,6 +1368,30 @@ export const routerAbi = [
             "internalType": "int128"
           }
         ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "tokensOf",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "agentId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address[]",
+        "internalType": "address[]"
       }
     ],
     "stateMutability": "view"
@@ -889,8 +1434,120 @@ export const routerAbi = [
   },
   {
     "type": "event",
+    "name": "Booked",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "agentId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "stock",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "pnl",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "ClosedOut",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "agentId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "base",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      },
+      {
+        "name": "fee",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "debt",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "DebtPaid",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "agentId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "debt",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "EIP712DomainChanged",
     "inputs": [],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "FillFeeSet",
+    "inputs": [
+      {
+        "name": "bps",
+        "type": "uint16",
+        "indexed": false,
+        "internalType": "uint16"
+      }
+    ],
     "anonymous": false
   },
   {
@@ -931,7 +1588,7 @@ export const routerAbi = [
         "name": "fill",
         "type": "tuple",
         "indexed": false,
-        "internalType": "struct FillmarkRouter.Fill",
+        "internalType": "struct FillmarkRouterV2.Fill",
         "components": [
           {
             "name": "agentId",
@@ -960,6 +1617,11 @@ export const routerAbi = [
           },
           {
             "name": "stockAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "fillFee",
             "type": "uint256",
             "internalType": "uint256"
           },
@@ -999,7 +1661,7 @@ export const routerAbi = [
         "name": "prices",
         "type": "tuple",
         "indexed": false,
-        "internalType": "struct FillmarkRouter.Prices",
+        "internalType": "struct FillmarkRouterV2.Prices",
         "components": [
           {
             "name": "nav",
@@ -1076,6 +1738,12 @@ export const routerAbi = [
         "internalType": "uint16"
       },
       {
+        "name": "perfFeeBps",
+        "type": "uint16",
+        "indexed": false,
+        "internalType": "uint16"
+      },
+      {
         "name": "maxPerTrade",
         "type": "uint128",
         "indexed": false,
@@ -1098,6 +1766,123 @@ export const routerAbi = [
   },
   {
     "type": "event",
+    "name": "MovedBack",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "agentId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "stock",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "qty",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MovedOut",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "agentId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "stock",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "qty",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "pnl",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "Settled",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "agentId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "base",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      },
+      {
+        "name": "peak",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      },
+      {
+        "name": "fee",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "paid",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "debt",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "Uninstalled",
     "inputs": [
       {
@@ -1112,6 +1897,11 @@ export const routerAbi = [
   {
     "type": "error",
     "name": "AlreadyInstalled",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BadAmount",
     "inputs": []
   },
   {
@@ -1141,6 +1931,11 @@ export const routerAbi = [
   },
   {
     "type": "error",
+    "name": "CloseOutPending",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "DecimalsChanged",
     "inputs": []
   },
@@ -1151,7 +1946,17 @@ export const routerAbi = [
   },
   {
     "type": "error",
+    "name": "InDebt",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "InvalidShortString",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "LowGas",
     "inputs": []
   },
   {
@@ -1172,6 +1977,16 @@ export const routerAbi = [
   {
     "type": "error",
     "name": "NonceUsed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotAdmin",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotClosing",
     "inputs": []
   },
   {
@@ -1265,6 +2080,17 @@ export const routerAbi = [
         "name": "value",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "SafeERC20FailedOperation",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
       }
     ]
   },
