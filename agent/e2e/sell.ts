@@ -1,7 +1,7 @@
 // Drives e2e/run.sh with FILLMARK_E2E_SCRIPT=e2e/sell.ts: the take-profit sale on a fork.
 // Crypto trades at any hour, so this runs while US stocks are closed. A fork cannot move a
-// Chainlink price, so each account gets a lot from a buy signed here with its own nonce,
-// and the agent runs with a take-profit threshold below that lot's cost.
+// Chainlink price, so each account gets a lot from a buy sent here by the agent wallet with
+// its own nonce, and the agent runs with a take-profit threshold below that lot's cost.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -9,10 +9,10 @@ import { join } from "node:path";
 import { createTestClient, encodeAbiParameters, erc20Abi, getAddress, http, keccak256, parseUnits, toHex, type Address } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { robinhood } from "viem/chains";
-import { DAY, buyNonce, saleNonce } from "../src/agent.js";
+import { DAY, GAS_CAP, buyNonce, saleNonce } from "../src/agent.js";
 import { routerAbi } from "../src/abi.generated.js";
-import { ASSETS, FEE_TIERS, IDENTITY, UNISWAP_FACTORY, USDG, clients, factoryAbi, identityAbi, poolAbi } from "../src/chain.js";
-import { signIntent, type FillIntent } from "../src/intent.js";
+import { ASSETS, IDENTITY, USDG, clients, identityAbi } from "../src/chain.js";
+import type { FillIntent } from "../src/intent.js";
 
 const rpc = process.env.FILLMARK_RPC!;
 const work = process.env.FILLMARK_E2E_DIR!;
@@ -46,17 +46,17 @@ const client = keyFile("client");
 for (const k of [deployer, agent, client]) await test.setBalance({ address: k.account.address, value: 10n ** 18n });
 
 const deployBlock = (await pub.getBlockNumber()) + 1n;
-step("deploy with script/DeployV2.s.sol");
+step("deploy with script/DeployV3.s.sol");
 execFileSync(
   "forge",
-  ["script", "script/DeployV2.s.sol", "--rpc-url", rpc, "--private-key", deployer.key, "--broadcast", "--slow", "--code-size-limit", "98304"],
-  { cwd: root, env: { ...process.env, FILLMARK_DEPLOYER: deployer.account.address, FOUNDRY_BROADCAST: join(work, "broadcast") }, stdio: "inherit" },
+  ["script", "script/DeployV3.s.sol", "--rpc-url", rpc, "--private-key", deployer.key, "--broadcast", "--slow"],
+  { cwd: root, env: { ...process.env, FOUNDRY_PROFILE: "chain", FILLMARK_DEPLOYER: deployer.account.address, FOUNDRY_BROADCAST: join(work, "broadcast") }, stdio: "inherit" },
 );
-const run = JSON.parse(readFileSync(join(work, "broadcast/DeployV2.s.sol/4663/run-latest.json"), "utf8"));
+const run = JSON.parse(readFileSync(join(work, "broadcast/DeployV3.s.sol/4663/run-latest.json"), "utf8"));
 writeFileSync(join(work, "deployed"), ""); // run.sh starts its block heartbeat after the deploy
 const created = (name: string) => getAddress(run.transactions.find((t: any) => t.contractName === name && t.transactionType === "CREATE").contractAddress);
-const router = created("FillmarkRouterV2");
-const burner = created("FillmarkBurner");
+const router = created("FillmarkRouterV3");
+const burner = getAddress(JSON.parse(readFileSync(join(root, "deployments/4663-v2.json"), "utf8")).burner); // the live burner
 
 step("register the agent");
 const reg = await pub.simulateContract({ address: IDENTITY, abi: identityAbi, functionName: "register", args: [""], account: agent.account });
@@ -89,33 +89,21 @@ async function account(name: string, maxPerTrade: string, salt: string, asset = 
   return a;
 }
 
-/// A buy of `usdg` signed here with a nonce the agent never uses: it gives the account a lot.
-/// `n` tells the buys of one account apart.
+/// A buy of `usdg` sent here by the agent wallet with a nonce the agent never uses: it gives
+/// the account a lot. `n` tells the buys of one account apart.
 async function seed(a: Address, usdg: string, n = 0, token: Address = WETH) {
   const cfg = await pub.readContract({ address: router, abi: routerAbi, functionName: "configs", args: [a] });
-  let last = "";
-  for (const fee of FEE_TIERS) {
-    const pool = await pub.readContract({ address: UNISWAP_FACTORY, abi: factoryAbi, functionName: "getPool", args: [USDG, token, fee] });
-    if (pool === "0x0000000000000000000000000000000000000000") continue;
-    const [sqrtP] = await pub.readContract({ address: pool, abi: poolAbi, functionName: "slot0" });
-    const it: FillIntent = {
-      agentId, account: a, installId: cfg[5], tokenIn: USDG, tokenOut: token, fee, amountIn: parseUnits(usdg, 6), minOut: 1n,
-      refSqrtPriceX96: sqrtP, maxDevBps: 50, sqrtPriceLimitX96: 0n, nonce: BigInt(keccak256(toHex(`e2e-seed-${a}-${n}`))),
-      deadline: (await pub.getBlock()).timestamp + 300n,
-    };
-    const sig = await signIntent(agent.account, router, 4663, it);
-    try {
-      const { request } = await pub.simulateContract({ address: router, abi: routerAbi, functionName: "execute", args: [it, sig], account: agent.account });
-      await pub.waitForTransactionReceipt({ hash: await agentWallet.writeContract(request) });
-      return;
-    } catch (err) {
-      last = String((err as Error).message).replace(/\s*\n\s*/g, " / ").slice(0, 600); // this tier is rejected: try the next one
-    }
-  }
-  throw new Error(`no tier can seed ${a}: ${last}`);
+  const it: FillIntent = {
+    agentId, account: a, installId: cfg[5], tokenIn: USDG, tokenOut: token, amountIn: parseUnits(usdg, 6), minOut: 1n,
+    sqrtPriceLimitX96: 0n, nonce: BigInt(keccak256(toHex(`e2e-seed-${a}-${n}`))), deadline: (await pub.getBlock()).timestamp + 300n,
+  };
+  const { request } = await pub.simulateContract({ address: router, abi: routerAbi, functionName: "execute", args: [it], account: agent.account });
+  // With the agent's fixed limit, as the bare estimate can revert LowGas a block later.
+  const receipt = await pub.waitForTransactionReceipt({ hash: await agentWallet.writeContract({ ...request, gas: GAS_CAP }) });
+  assert.equal(receipt.status, "success", `seed buy for ${a} reverted`);
 }
 
-step("accounts: E sells its whole lot at once, G sells it in several sales, K (cbBTC) stops at its daily limit, F (10 USDG per trade) cannot sell");
+step("accounts: E sells its whole lot at once, G and K (cbBTC, token1 of its pool) sell in several sales, F (10 USDG per trade) cannot sell");
 const E = await account("E", "1000", "11");
 const G = await account("G", "12", "12");
 const F = await account("F", "10", "13");
@@ -139,7 +127,7 @@ const refused = spawnSync(tsx, ["src/agent.ts", "--config", config, "--once"], {
 assert.notEqual(refused.status, 0);
 assert.match(refused.stdout + refused.stderr, /takeProfitBps must be an integer in 1\.\.100000/);
 
-step("take-profit threshold below cost (-5%), as a fork cannot raise the price: E sells its whole lot, G sells until under 10 USDG is left, K stops at its daily limit, F buys instead");
+step("take-profit threshold below cost (-5%), as a fork cannot raise the price: E sells its whole lot, G and K sell until under 10 USDG is left (sales do not use the daily limit), F buys instead");
 writeConfig(-500);
 const l = runAgent(config);
 const by = (a: Address) => l.filter((x) => x.msg === "filled" && x.account === a);
@@ -158,8 +146,10 @@ assert.ok(gLot.qty < pre.G.qty);
 const gLeft = (gLot.qty * BigInt(g.at(-1)!.nav as string)) / 10n ** 20n; // NAV value of what is left
 assert.ok(gLeft < 10_200_000n, `G kept ${gLeft} USDG micro of its lot`);
 const k = by(K);
-assert.deepEqual(k.map((x) => x.side), ["sell", "sell"], JSON.stringify(l)); // 60 USDG a day, 36 spent on the seed buys: two sales of about 12
-assert.ok((await lotOf(K, CBBTC)).qty > 0n);
+// K's limit is 60 USDG a day and its seed buys used 36 of it; sales use none, so K sells on.
+assert.ok(k.length >= 2 && k.every((x) => x.side === "sell"), JSON.stringify(l));
+const kLot = await lotOf(K, CBBTC);
+assert.ok((kLot.qty * BigInt(k.at(-1)!.nav as string)) / 10n ** 10n < 10_200_000n, `K kept ${kLot.qty} units`);
 const f = by(F);
 assert.deepEqual(f.map((x) => x.side), ["buy"], JSON.stringify(l));
 assert.equal(usdg(f[0]), 10_000_000n);
@@ -194,10 +184,10 @@ assert.equal(fh[0].side, "buy");
 assert.ok((await lotOf(H)).qty > hBefore.qty);
 
 step("after a sale no buy of that asset until the router's hold ends: sales 3 and 7 days ago pause the buy, 8 days ago does not");
-// The router's nonceUsed (storage slot 5) is set as a sale of those days would have left it: a fork
+// The router's nonceUsed (storage slot 3 in v3) is set as a sale of those days would have left it: a fork
 // cannot move a week ahead, as its price feeds would go stale.
 const markSold = async (a: Address, d: bigint) => {
-  const inner = keccak256(encodeAbiParameters([{ type: "address" }, { type: "uint256" }], [a, 5n]));
+  const inner = keccak256(encodeAbiParameters([{ type: "address" }, { type: "uint256" }], [a, 3n]));
   const slot = keccak256(encodeAbiParameters([{ type: "uint256" }, { type: "bytes32" }], [saleNonce(a, WETH, d, 0n), inner]));
   await test.setStorageAt({ address: router, index: slot, value: toHex(1n, { size: 32 }) });
   assert.equal(await pub.readContract({ address: router, abi: routerAbi, functionName: "nonceUsed", args: [a, saleNonce(a, WETH, d, 0n)] }), true);

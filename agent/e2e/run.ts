@@ -1,21 +1,41 @@
-// Drives e2e/run.sh: the real v2 deploy script next to the live v1 contracts, a registered
-// agent, Kernel accounts made by the CLI, agent runs that find their clients on chain (ETH
-// reserve, a buy already made on the v1 router the same day, round robin and the daily
-// fill cap across restarts, the fill fee, daily limits, unfunded, expired, hooked and
-// non-Kernel accounts), then withdraw, a failing withdraw, settle, close-out and pay-debt
+// Drives e2e/run.sh: the real v3 deploy script next to the live v1 and v2 contracts, a
+// registered agent, Kernel accounts made by the CLI, agent runs that find their clients on
+// chain (ETH reserve, a buy already made on the live v2 router the same day, round robin and
+// the daily fill cap across restarts, the fill fee, the rolling 24-hour buy limit with buys
+// sized to fit it, regular hours only, unfunded, expired, hooked and non-Kernel accounts),
+// then withdraw, a failing withdraw, settle, release, claim, close-out and pay-debt
 // refusals, uninstall (which closes the book) and reinstall, and an account owned by a
 // wallet that only signs.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { concat, createTestClient, encodeAbiParameters, encodeFunctionData, erc20Abi, formatUnits, getAddress, hashTypedData, http, keccak256, pad, parseAbi, parseUnits, zeroAddress, type Abi, type Address, type Hex } from "viem";
+import { concat, createTestClient, encodeAbiParameters, encodeFunctionData, erc20Abi, formatUnits, getAddress, http, keccak256, pad, parseEventLogs, parseUnits, zeroAddress, type Abi, type Address, type Hex } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { robinhood } from "viem/chains";
 import { DAY, buyNonce } from "../src/agent.js";
 import { feedsAbi, routerAbi } from "../src/abi.generated.js";
-import { ASSETS, ECDSA_VALIDATOR, IDENTITY, SESSIONS, UNISWAP_FACTORY, USDG, clients, factoryAbi, identityAbi, kernelAbi, poolAbi } from "../src/chain.js";
-import { intentDomain, intentTypes, type FillIntent } from "../src/intent.js";
+import { ASSETS, ECDSA_VALIDATOR, IDENTITY, SESSIONS, USDG, clients, identityAbi, kernelAbi, poolAbi } from "../src/chain.js";
+import type { FillIntent } from "../src/intent.js";
+
+// Router v2's signed intent (the live router clients move from).
+const v2IntentTypes = {
+  FillIntent: [
+    { name: "agentId", type: "uint256" },
+    { name: "account", type: "address" },
+    { name: "installId", type: "uint64" },
+    { name: "tokenIn", type: "address" },
+    { name: "tokenOut", type: "address" },
+    { name: "fee", type: "uint24" },
+    { name: "amountIn", type: "uint256" },
+    { name: "minOut", type: "uint256" },
+    { name: "refSqrtPriceX96", type: "uint160" },
+    { name: "maxDevBps", type: "uint16" },
+    { name: "sqrtPriceLimitX96", type: "uint160" },
+    { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint64" },
+  ],
+} as const;
 
 const rpc = process.env.FILLMARK_RPC!;
 const work = process.env.FILLMARK_E2E_DIR!;
@@ -69,26 +89,28 @@ for (const k of [deployer, agent, client]) {
 }
 
 const deployBlock = (await pub.getBlockNumber()) + 1n;
-step("deploy with script/DeployV2.s.sol");
+step("deploy with script/DeployV3.s.sol");
 execFileSync(
   "forge",
-  // Robinhood Chain allows contracts up to 98304 bytes (mainnet eth_call: "code size 98305
-  // limit 98304"); FillmarkRouterV2 is larger than Ethereum's 24 KiB, forge's default.
-  ["script", "script/DeployV2.s.sol", "--rpc-url", rpc, "--private-key", deployer.key, "--broadcast", "--slow", "--code-size-limit", "98304"],
+  // Profile "chain": Robinhood Chain allows contracts up to 98304 bytes (mainnet eth_call:
+  // "code size 98305 limit 98304"); router v3 is larger than Ethereum's 24 KiB.
+  ["script", "script/DeployV3.s.sol", "--rpc-url", rpc, "--private-key", deployer.key, "--broadcast", "--slow"],
   {
     cwd: root,
-    env: { ...process.env, FILLMARK_DEPLOYER: deployer.account.address, FOUNDRY_BROADCAST: join(work, "broadcast") },
+    env: { ...process.env, FOUNDRY_PROFILE: "chain", FILLMARK_DEPLOYER: deployer.account.address, FOUNDRY_BROADCAST: join(work, "broadcast") },
     stdio: "inherit",
   },
 );
-const run = JSON.parse(readFileSync(join(work, "broadcast/DeployV2.s.sol/4663/run-latest.json"), "utf8"));
+const run = JSON.parse(readFileSync(join(work, "broadcast/DeployV3.s.sol/4663/run-latest.json"), "utf8"));
 writeFileSync(join(work, "deployed"), ""); // run.sh starts its block heartbeat after the deploy
 const created = (name: string) => getAddress(run.transactions.find((t: any) => t.contractName === name && t.transactionType === "CREATE").contractAddress);
-const router = created("FillmarkRouterV2");
-const burnerAddr = created("FillmarkBurner");
-// v2 runs next to the live v1 deployment: its feeds, and its timelock (owned by the Safe) as admin.
+const router = created("FillmarkRouterV3");
+// v3 runs next to the live deployments: v1's feeds and timelock (owned by the Safe) as
+// admin, and v2's burner, which both routers pay.
 const deployment = JSON.parse(readFileSync(join(root, "deployments/4663.json"), "utf8"));
-const liveRouter = getAddress(deployment.router);
+const deploymentV2 = JSON.parse(readFileSync(join(root, "deployments/4663-v2.json"), "utf8"));
+const burnerAddr = getAddress(deploymentV2.burner);
+const liveRouter = getAddress(deploymentV2.router); // the router clients move from
 const feeds = await pub.readContract({ address: router, abi: routerAbi, functionName: "feeds" });
 const routerAdmin = await pub.readContract({ address: router, abi: routerAbi, functionName: "admin" });
 assert.equal(feeds, getAddress(deployment.feeds));
@@ -110,6 +132,7 @@ assert.equal(await pub.readContract({ address: IDENTITY, abi: identityAbi, funct
 
 const env = { FILLMARK_RPC: rpc, FILLMARK_ROUTER: router, FILLMARK_KEY_FILE: client.path };
 const installFlags = ["--agent-id", String(agentId), "--max-per-trade", "50", "--daily-limit", "200", "--expiry-days", "30", "--max-slip-bps", "200", "--perf-fee-bps", "0", "--assets", "TSLA,NVDA,WETH,cbBTC"];
+const burnerStart = await pub.readContract({ address: USDG, abi: erc20Abi, functionName: "balanceOf", args: [burnerAddr] });
 const deal = (a: Address, usdg: string) => test.request({ method: "anvil_dealERC20" as any, params: [a, USDG, "0x" + parseUnits(usdg, 6).toString(16)] as any });
 
 step("cli create");
@@ -119,14 +142,14 @@ const account = getAddress(JSON.parse(c1.out).account);
 assert.equal(await pub.readContract({ address: router, abi: routerAbi, functionName: "isInitialized", args: [account] }), true);
 await deal(account, "1000");
 
-step("EIP-712 hash matches the router");
+step("only the agent wallet sends fills: the client's key is refused");
 const sample: FillIntent = {
-  agentId, account, installId: 1n, tokenIn: USDG, tokenOut: ASSETS.TSLA, fee: 3000, amountIn: 1n, minOut: 2n,
-  refSqrtPriceX96: 3n, maxDevBps: 4, sqrtPriceLimitX96: 5n, nonce: 6n, deadline: 7n,
+  agentId, account, installId: 1n, tokenIn: USDG, tokenOut: ASSETS.WETH, amountIn: 20_000_000n, minOut: 1n,
+  sqrtPriceLimitX96: 0n, nonce: 6n, deadline: (await pub.getBlock()).timestamp + 300n,
 };
-assert.equal(
-  hashTypedData({ domain: intentDomain(router, 4663), types: intentTypes, primaryType: "FillIntent", message: sample }),
-  await pub.readContract({ address: router, abi: routerAbi, functionName: "hashIntent", args: [sample] }),
+await assert.rejects(
+  pub.simulateContract({ address: router, abi: routerAbi, functionName: "execute", args: [sample], account: client.account }),
+  /NotAgentWallet/,
 );
 
 const usdgOf = (a: Address) => pub.readContract({ address: USDG, abi: erc20Abi, functionName: "balanceOf", args: [a] });
@@ -134,10 +157,10 @@ const statsOf = (token: Address, a: Address = account) => pub.readContract({ add
 const filled = (lines: { msg: string; [k: string]: unknown }[], a?: Address) => lines.filter((l) => l.msg === "filled" && (!a || l.account === a));
 const lastServed = (lines: { msg: string; [k: string]: unknown }[]) => lines.filter((l) => l.msg === "clients").at(-1)?.served;
 
-step("the live v1 agent's 20 Nov 2026 TSLA buy for the live account used the nonce this agent checks on v1");
+step("the live agent's 23 Nov 2026 cbBTC buy for the live account used the nonce this agent checks on v2");
 const live = getAddress("0xB5667f1c68bADFc54CE5eaCc60EACb89473Ec37C");
-const v1Abi = JSON.parse(readFileSync(join(root, "out/FillmarkRouter.sol/FillmarkRouter.json"), "utf8")).abi as Abi;
-assert.equal(await pub.readContract({ address: liveRouter, abi: v1Abi, functionName: "nonceUsed", args: [live, buyNonce(live, ASSETS.TSLA, 20_777n)] }), true);
+const v2Abi = JSON.parse(readFileSync(join(root, "out/FillmarkRouterV2.sol/FillmarkRouterV2.json"), "utf8")).abi as Abi;
+assert.equal(await pub.readContract({ address: liveRouter, abi: v2Abi, functionName: "nonceUsed", args: [live, buyNonce(live, ASSETS.cbBTC, 20_780n)] }), true);
 
 // All agent runs below must fall in one UTC day: skip ahead if midnight is near.
 const toMidnight = DAY - ((await pub.getBlock()).timestamp % DAY);
@@ -174,40 +197,41 @@ assert.equal(filled(l0).length, 0, JSON.stringify(l0));
 assert.ok(l0.some((l) => l.msg === "agent ETH below the reserve, no fills until it is topped up"), JSON.stringify(l0));
 await test.setBalance({ address: agent.account.address, value: 10n ** 18n });
 
-step("A also on the live v1 router, which buys its TSLA today under the same nonce, as the v1 agent does");
-// A moves from v1 the way a client does: the account itself installs and later removes
-// the v1 router (Kernel lets the account call its own module functions).
+step("A also on the live v2 router, which buys its TSLA today under the same nonce, as the v2 agent does");
+// A moves from v2 the way a client does: the account itself installs and later removes
+// the v2 router (Kernel lets the account call its own module functions).
 await test.impersonateAccount({ address: account });
 await test.setBalance({ address: account, value: 10n ** 18n });
 const asAccount = (data: Hex) => test.sendUnsignedTransaction({ from: account, to: account, data });
-const v1Install = encodeAbiParameters(
-  [{ type: "uint256" }, { type: "uint128" }, { type: "uint128" }, { type: "uint64" }, { type: "uint16" }, { type: "address[]" }],
-  [agentId, 50_000_000n, 200_000_000n, (await pub.getBlock()).timestamp + 86_400n, 200, [ASSETS.TSLA]],
+const v2Install = encodeAbiParameters(
+  [{ type: "uint256" }, { type: "uint128" }, { type: "uint128" }, { type: "uint64" }, { type: "uint16" }, { type: "uint16" }, { type: "address[]" }],
+  [agentId, 50_000_000n, 200_000_000n, (await pub.getBlock()).timestamp + 86_400n, 200, 0, [ASSETS.TSLA]],
 );
 const moduleData = (data: Hex) => concat([zeroAddress, encodeAbiParameters([{ type: "bytes" }, { type: "bytes" }], [data, "0x"])]);
-await pub.waitForTransactionReceipt({ hash: await asAccount(encodeFunctionData({ abi: kernelAbi, functionName: "installModule", args: [2n, liveRouter, moduleData(v1Install)] })) });
-const v1Cfg = (await pub.readContract({ address: liveRouter, abi: v1Abi, functionName: "configs", args: [account] })) as readonly unknown[];
-assert.equal(v1Cfg[5], true);
-const tslaPool = await pub.readContract({ address: UNISWAP_FACTORY, abi: factoryAbi, functionName: "getPool", args: [USDG, ASSETS.TSLA, 500] });
-const [sqrtTsla] = await pub.readContract({ address: tslaPool, abi: poolAbi, functionName: "slot0" });
-const v1It: FillIntent = {
-  agentId, account, installId: v1Cfg[4] as bigint, tokenIn: USDG, tokenOut: ASSETS.TSLA, fee: 500, amountIn: 50_000_000n, minOut: 1n,
+await pub.waitForTransactionReceipt({ hash: await asAccount(encodeFunctionData({ abi: kernelAbi, functionName: "installModule", args: [2n, liveRouter, moduleData(v2Install)] })) });
+const v2Cfg = (await pub.readContract({ address: liveRouter, abi: v2Abi, functionName: "configs", args: [account] })) as readonly unknown[];
+assert.equal(v2Cfg[6], true);
+const tslaPool = (await pub.readContract({ address: router, abi: routerAbi, functionName: "poolOf", args: [ASSETS.TSLA] })) as { pool: Address; fee: number };
+const [sqrtTsla] = await pub.readContract({ address: tslaPool.pool, abi: poolAbi, functionName: "slot0" });
+const v2It = {
+  agentId, account, installId: v2Cfg[5] as bigint, tokenIn: USDG, tokenOut: ASSETS.TSLA, fee: tslaPool.fee, amountIn: 50_000_000n, minOut: 1n,
   refSqrtPriceX96: sqrtTsla, maxDevBps: 50, sqrtPriceLimitX96: 0n, nonce: buyNonce(account, ASSETS.TSLA, day),
   deadline: (await pub.getBlock()).timestamp + 300n,
 };
-const v1Sig = await agent.account.signTypedData({
-  domain: { name: "Fillmark", version: "1", chainId: 4663, verifyingContract: liveRouter },
-  types: intentTypes,
+const v2Sig = await agent.account.signTypedData({
+  domain: { name: "Fillmark", version: "2", chainId: 4663, verifyingContract: liveRouter },
+  types: v2IntentTypes,
   primaryType: "FillIntent",
-  message: v1It,
+  message: v2It,
 });
-const v1Sim = await pub.simulateContract({ address: liveRouter, abi: v1Abi, functionName: "execute", args: [v1It, v1Sig], account: agent.account });
-await pub.waitForTransactionReceipt({ hash: await agentWallet.writeContract(v1Sim.request as any) });
+const v2Sim = await pub.simulateContract({ address: liveRouter, abi: v2Abi, functionName: "execute", args: [v2It, v2Sig], account: agent.account });
+await pub.waitForTransactionReceipt({ hash: await agentWallet.writeContract(v2Sim.request as any) });
 await pub.waitForTransactionReceipt({ hash: await asAccount(encodeFunctionData({ abi: kernelAbi, functionName: "uninstallModule", args: [2n, liveRouter, "0x"] })) });
 await test.stopImpersonatingAccount({ address: account });
-assert.equal(await usdgOf(account), parseUnits("950", 6)); // v1 has no fill fee
+const v2Fee = (50_000_000n * 3n) / 10_000n; // v2's fill fee, to the same burner
+assert.equal(await usdgOf(account), parseUnits("1000", 6) - 50_000_000n - v2Fee);
 
-step("agent run 1 with a cap of 3 fills a day, round robin: not A's TSLA (bought on v1), A's NVDA, then B's NVDA and TSLA, then the cap");
+step("agent run 1 with a cap of 3 fills a day, round robin: not A's TSLA (bought on v2), A's NVDA, then B's NVDA and TSLA, then the cap");
 const l1 = runAgent(config);
 const assetsOf = (lines: { msg: string; [k: string]: unknown }[], a: Address) => filled(lines, a).map((l) => l.asset).sort();
 assert.deepEqual(assetsOf(l1, account), ["NVDA"], JSON.stringify(l1));
@@ -221,6 +245,14 @@ const l1b = runAgent(config);
 assert.equal(filled(l1b).length, 0, JSON.stringify(l1b));
 assert.ok(l1b.some((l) => l.msg === "daily fill cap reached, no more trades today"), JSON.stringify(l1b));
 
+// B's second buy is sized so that it and its fill fee fit the rolling 60 USDG limit.
+const bFills = filled(l1, accountB);
+const usdgFee = (f: { [k: string]: unknown }) => BigInt(f.usdg as string) + BigInt(f.fillFee as string);
+assert.equal(BigInt(bFills[0].usdg as string), 30_000_000n);
+assert.equal(BigInt(bFills[1].usdg as string), ((60_000_000n - usdgFee(bFills[0])) * 10_000n) / 10_003n);
+assert.ok(usdgFee(bFills[0]) + usdgFee(bFills[1]) <= 60_000_000n);
+assert.equal(await pub.readContract({ address: router, abi: routerAbi, functionName: "windowSpent", args: [accountB] }), usdgFee(bFills[0]) + usdgFee(bFills[1]));
+
 step("agent run 2 with a cap of 300: A buys the rest, B is at its daily limit, C is not funded (served for sales, too poor to buy)");
 writeConfig(300);
 const l2 = runAgent(config);
@@ -228,13 +260,15 @@ assert.deepEqual(assetsOf(l2, account), ["WETH", "cbBTC"], JSON.stringify(l2));
 assert.equal(filled(l2).length, 2, JSON.stringify(l2));
 assert.equal(lastServed(l2), 3, JSON.stringify(l2));
 assert.ok(l2.some((l) => l.msg === "daily limit reached" && l.account === accountB), JSON.stringify(l2));
-assert.equal((await statsOf(ASSETS.TSLA)).fills, 0); // bought on v1
+assert.equal((await statsOf(ASSETS.TSLA)).fills, 0); // bought on v2
 for (const t of ["NVDA", "WETH", "cbBTC"]) assert.equal((await statsOf(ASSETS[t])).fills, 1, t);
 for (const f of [...filled(l1), ...filled(l2)]) assert.equal(BigInt(f.fillFee as string), (BigInt(f.usdg as string) * 3n) / 10_000n);
-// Each buy pays its amount plus 3 bps to the burner.
-assert.equal(await usdgOf(account), parseUnits("799.955", 6));
-assert.equal(await usdgOf(accountB), parseUnits("939.982", 6));
-assert.equal(await usdgOf(burnerAddr), parseUnits("0.063", 6));
+// Each buy pays its amount plus 3 bps to the burner; v2's fill went to the same burner.
+const aLeft = parseUnits("1000", 6) - 50_000_000n - v2Fee - 3n * 50_015_000n;
+assert.equal(await usdgOf(account), aLeft);
+assert.equal(await usdgOf(accountB), parseUnits("1000", 6) - usdgFee(bFills[0]) - usdgFee(bFills[1]));
+const v3Fees = [...filled(l1), ...filled(l2)].reduce((t, f) => t + BigInt(f.fillFee as string), 0n);
+assert.equal(await usdgOf(burnerAddr), burnerStart + v2Fee + v3Fees);
 assert.equal(await pub.readContract({ address: REPUTATION, abi: reputationAbi, functionName: "getLastIndex", args: [agentId, account] }), 8n);
 for (const t of ["NVDA", "WETH", "cbBTC"]) {
   const used = await pub.readContract({ address: router, abi: routerAbi, functionName: "nonceUsed", args: [account, buyNonce(account, ASSETS[t], day)] });
@@ -274,8 +308,8 @@ const eoa = keyFile("eoa");
 await test.setBalance({ address: eoa.account.address, value: 10n ** 18n });
 const eoaWallet = clients(eoa.account).wallet!;
 const eoaInit = encodeAbiParameters(
-  [{ type: "uint256" }, { type: "uint128" }, { type: "uint128" }, { type: "uint64" }, { type: "uint16" }, { type: "uint16" }, { type: "address[]" }],
-  [agentId, 50_000_000n, 200_000_000n, (await pub.getBlock()).timestamp + 86_400n, 200, 0, [ASSETS.WETH]],
+  [{ type: "uint256" }, { type: "uint128" }, { type: "uint128" }, { type: "uint64" }, { type: "uint16" }, { type: "uint16" }, { type: "bool" }, { type: "address[]" }],
+  [agentId, 50_000_000n, 200_000_000n, (await pub.getBlock()).timestamp + 86_400n, 200, 0, false, [ASSETS.WETH]],
 );
 await pub.waitForTransactionReceipt({ hash: await eoaWallet.writeContract({ address: router, abi: routerAbi, functionName: "onInstall", args: [eoaInit] }) });
 await deal(eoa.account.address, "1000");
@@ -284,7 +318,7 @@ assert.equal(filled(lE).length, 0, JSON.stringify(lE));
 assert.ok(lE.some((l) => l.msg === "account is not a plain Kernel account, skipped today" && l.account === eoa.account.address), JSON.stringify(lE));
 await pub.waitForTransactionReceipt({ hash: await eoaWallet.writeContract({ address: router, abi: routerAbi, functionName: "onUninstall", args: ["0x"] }) });
 
-step("B reinstalls with other limits the same day: assets bought today are not bought again");
+step("B reinstalls with other limits the same day: assets bought today are not bought again, and the rolling window carries over");
 const ub = cli(env, "uninstall", accountB);
 assert.equal(ub.code, 0, ub.err);
 const ubOut = JSON.parse(ub.out);
@@ -295,8 +329,9 @@ assert.equal(ib.code, 0, ib.err);
 const lB = runAgent(config);
 assert.deepEqual(filled(lB, accountB).map((l) => l.asset).sort(), ["WETH", "cbBTC"], JSON.stringify(lB));
 assert.equal(filled(lB).length, 2, JSON.stringify(lB));
+assert.ok((await pub.readContract({ address: router, abi: routerAbi, functionName: "windowSpent", args: [accountB] })) <= 100_000_000n);
 
-step("C funded: served; after its expiry: dropped");
+step("C funded: served; after its expiry: no buys, still served for sales in the router's 7-day grace");
 await deal(accountC, "300");
 const l4 = runAgent(config);
 assert.equal(filled(l4, accountC).length, 4, JSON.stringify(l4));
@@ -306,7 +341,22 @@ await test.mine({ blocks: 1 });
 await deal(accountC, "300");
 const l5 = runAgent(config);
 assert.equal(filled(l5).length, 0, JSON.stringify(l5));
-assert.equal(lastServed(l5), 2, JSON.stringify(l5));
+assert.equal(lastServed(l5), 3, JSON.stringify(l5));
+assert.ok(l5.some((l) => l.msg === "permission expired, sales only until the router's grace ends" && l.account === accountC), JSON.stringify(l5));
+
+step("an account for regular hours only: in the extended session its stocks are not traded, crypto is");
+const cR = cli(env, "create", ...installFlags, "--regular-only", "--salt", "5");
+assert.equal(cR.code, 0, cR.err);
+const accountR = getAddress(JSON.parse(cR.out).account);
+await deal(accountR, "1000");
+const cfgR = await pub.readContract({ address: router, abi: routerAbi, functionName: "configs", args: [accountR] });
+assert.equal(cfgR[7], true); // regularOnly
+const sessionR = SESSIONS[await pub.readContract({ address: feeds, abi: feedsAbi, functionName: "sessionAt", args: [(await pub.getBlock()).timestamp] })];
+const lR = runAgent(config);
+const rAssets = assetsOf(lR, accountR);
+if (sessionR === "Extended") assert.deepEqual(rAssets, ["WETH", "cbBTC"], JSON.stringify(lR));
+else assert.deepEqual(rAssets, ["NVDA", "TSLA", "WETH", "cbBTC"], JSON.stringify(lR));
+console.log(`   session ${sessionR}: R bought ${rAssets.join(", ")}`);
 
 step("cli status");
 const s = cli(env, "status", account);
@@ -344,13 +394,21 @@ step("cli withdraw more USDG than the account holds fails and says so");
 const bad = cli(env, "withdraw", account, "USDG", "100000");
 assert.equal(bad.code, 1);
 assert.match(bad.err, /user operation failed/);
-assert.equal(await usdgOf(account), parseUnits("799.955", 6));
+assert.equal(await usdgOf(account), aLeft);
 
 step("cli settle: nothing is due (the agent has only bought)");
 const se = cli(env, "settle", accountB);
 assert.equal(se.code, 0, se.err);
 assert.equal(JSON.parse(se.out).feeUsdg, "0");
 assert.equal(JSON.parse(se.out).debtUsdg, "0");
+
+step("cli release with no escrow returns nothing; claim with nothing owed is refused");
+const rl = cli(env, "release", accountB);
+assert.equal(rl.code, 0, rl.err);
+assert.equal(JSON.parse(rl.out).accountUsdgChange, "0");
+const cl = cli(env, "claim", accountB);
+assert.equal(cl.code, 1);
+assert.match(cl.err, /nothing to claim/);
 
 step("cli pay-debt with nothing owed, and close-out of an installed account, are refused");
 const pd = cli(env, "pay-debt", account, "--agent-id", String(agentId));
@@ -367,7 +425,7 @@ assert.equal(JSON.parse(u.out).bookClosed, true, u.out);
 assert.equal(await pub.readContract({ address: router, abi: routerAbi, functionName: "isInitialized", args: [account] }), false);
 const l6 = runAgent(config);
 assert.equal(filled(l6).length, 0, JSON.stringify(l6));
-assert.equal(lastServed(l6), 1, JSON.stringify(l6));
+assert.equal(lastServed(l6), 3, JSON.stringify(l6)); // B, C (sales grace) and R
 
 step("agent refuses an RPC clock far from the local clock");
 const l7 = runAgent(config, { FILLMARK_MAX_CLOCK_SKEW: "60" });

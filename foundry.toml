@@ -6,17 +6,21 @@ solc = "0.8.30"
 evm_version = "cancun"
 optimizer = true
 optimizer_runs = 200
-# Robinhood Chain allows contracts up to 98,304 bytes (EIP-170's 24,576 does not apply there);
-# router v2 is about 33 KB.
-code_size_limit = 98304
 remappings = [
     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
     "forge-std/=lib/forge-std/src/",
 ]
 
-fs_permissions = [{ access = "read", path = "./assets.json" }]
+fs_permissions = [{ access = "read", path = "./assets.json" }, { access = "read", path = "./v3-pools.json" }]
 # Off: its generated helpers (foundry-pp/) leave stale-artifact warnings in later forge runs.
 dynamic_test_linking = false
+
+# Robinhood Chain allows contracts up to 98,304 bytes (EIP-170's 24,576 does not apply there);
+# router v2 is about 33 KB, v3 about 38 KB. `FOUNDRY_PROFILE=chain forge build --sizes` checks
+# src against that. The default profile leaves the limit unset: test contracts embed the
+# routers' creation code and run only on forks.
+[profile.chain]
+code_size_limit = 98304
 
 [lint]
 # Time is the point here (deadlines, feed age, sessions); a sequencer's few seconds of

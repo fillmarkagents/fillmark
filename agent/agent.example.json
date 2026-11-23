@@ -5,7 +5,7 @@
   "deployBlock": "0",
   "maxFillsPerDay": 300,
   "minEth": "0.0005",
-  "previousRouter": "0xe542a7c8779962b8f819c4352d1436e08bc2d388",
+  "previousRouter": "0x15A172CAA75AB7de22E9Bb3Cd981eA8c76cBe366",
   "previousRouterUntilDay": "0",
   "minPerfFeeBps": 0,
   "tickSec": 60,

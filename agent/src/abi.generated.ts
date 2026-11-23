@@ -5,56 +5,100 @@ export const routerAbi = [
     "type": "constructor",
     "inputs": [
       {
-        "name": "identity_",
-        "type": "address",
-        "internalType": "contract IIdentityRegistry"
+        "name": "s",
+        "type": "tuple",
+        "internalType": "struct FillmarkRouterV3.Setup",
+        "components": [
+          {
+            "name": "identity",
+            "type": "address",
+            "internalType": "contract IIdentityRegistry"
+          },
+          {
+            "name": "reputation",
+            "type": "address",
+            "internalType": "contract IReputationRegistry"
+          },
+          {
+            "name": "factory",
+            "type": "address",
+            "internalType": "contract IUniswapV3Factory"
+          },
+          {
+            "name": "usdg",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "feeds",
+            "type": "address",
+            "internalType": "contract FillmarkFeeds"
+          },
+          {
+            "name": "burner",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "admin",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "guardian",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "fillFeeBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "hold",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "twapWindow",
+            "type": "uint32",
+            "internalType": "uint32"
+          }
+        ]
       },
       {
-        "name": "reputation_",
-        "type": "address",
-        "internalType": "contract IReputationRegistry"
-      },
-      {
-        "name": "factory_",
-        "type": "address",
-        "internalType": "contract IUniswapV3Factory"
-      },
-      {
-        "name": "usdg_",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "feeds_",
-        "type": "address",
-        "internalType": "contract FillmarkFeeds"
-      },
-      {
-        "name": "burner_",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "admin_",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "fillFeeBps_",
-        "type": "uint16",
-        "internalType": "uint16"
-      },
-      {
-        "name": "hold_",
-        "type": "uint64",
-        "internalType": "uint64"
+        "name": "pools_",
+        "type": "tuple[]",
+        "internalType": "struct FillmarkRouterV3.InitialPool[]",
+        "components": [
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "pool",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "capBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "twapCapBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          }
+        ]
       }
     ],
     "stateMutability": "nonpayable"
   },
   {
     "type": "function",
-    "name": "FEEDBACK_GAS",
+    "name": "DUST_LOSS",
     "inputs": [],
     "outputs": [
       {
@@ -67,13 +111,13 @@ export const routerAbi = [
   },
   {
     "type": "function",
-    "name": "INTENT_TYPEHASH",
+    "name": "FEEDBACK_GAS",
     "inputs": [],
     "outputs": [
       {
         "name": "",
-        "type": "bytes32",
-        "internalType": "bytes32"
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -119,7 +163,46 @@ export const routerAbi = [
   },
   {
     "type": "function",
+    "name": "MAX_POOL_CAP_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "MAX_SLIP_LIMIT_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_TWAP_WINDOW",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MIN_CARDINALITY",
     "inputs": [],
     "outputs": [
       {
@@ -158,6 +241,19 @@ export const routerAbi = [
   },
   {
     "type": "function",
+    "name": "MIN_TWAP_WINDOW",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "PAY_GAS",
     "inputs": [],
     "outputs": [
@@ -165,6 +261,19 @@ export const routerAbi = [
         "name": "",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "SELL_GRACE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ],
     "stateMutability": "view"
@@ -191,6 +300,19 @@ export const routerAbi = [
         "name": "",
         "type": "uint8",
         "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "WINDOW_HOURS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -227,7 +349,7 @@ export const routerAbi = [
       {
         "name": "",
         "type": "tuple",
-        "internalType": "struct FillmarkRouterV2.Book",
+        "internalType": "struct FillmarkRouterV3.Book",
         "components": [
           {
             "name": "realized",
@@ -246,6 +368,16 @@ export const routerAbi = [
           },
           {
             "name": "paid",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "escMatured",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "outLoss",
             "type": "uint128",
             "internalType": "uint128"
           },
@@ -302,6 +434,38 @@ export const routerAbi = [
         "name": "",
         "type": "address",
         "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "claim",
+    "inputs": [
+      {
+        "name": "who",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "claimable",
+    "inputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -377,6 +541,11 @@ export const routerAbi = [
         "internalType": "bool"
       },
       {
+        "name": "regularOnly",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
         "name": "maxPerTrade",
         "type": "uint128",
         "internalType": "uint128"
@@ -385,59 +554,6 @@ export const routerAbi = [
         "name": "dailyLimit",
         "type": "uint128",
         "internalType": "uint128"
-      },
-      {
-        "name": "spentToday",
-        "type": "uint128",
-        "internalType": "uint128"
-      },
-      {
-        "name": "day",
-        "type": "uint64",
-        "internalType": "uint64"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "eip712Domain",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "fields",
-        "type": "bytes1",
-        "internalType": "bytes1"
-      },
-      {
-        "name": "name",
-        "type": "string",
-        "internalType": "string"
-      },
-      {
-        "name": "version",
-        "type": "string",
-        "internalType": "string"
-      },
-      {
-        "name": "chainId",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "verifyingContract",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "salt",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "extensions",
-        "type": "uint256[]",
-        "internalType": "uint256[]"
       }
     ],
     "stateMutability": "view"
@@ -449,7 +565,7 @@ export const routerAbi = [
       {
         "name": "it",
         "type": "tuple",
-        "internalType": "struct FillmarkRouterV2.FillIntent",
+        "internalType": "struct FillmarkRouterV3.FillIntent",
         "components": [
           {
             "name": "agentId",
@@ -477,11 +593,6 @@ export const routerAbi = [
             "internalType": "address"
           },
           {
-            "name": "fee",
-            "type": "uint24",
-            "internalType": "uint24"
-          },
-          {
             "name": "amountIn",
             "type": "uint256",
             "internalType": "uint256"
@@ -490,16 +601,6 @@ export const routerAbi = [
             "name": "minOut",
             "type": "uint256",
             "internalType": "uint256"
-          },
-          {
-            "name": "refSqrtPriceX96",
-            "type": "uint160",
-            "internalType": "uint160"
-          },
-          {
-            "name": "maxDevBps",
-            "type": "uint16",
-            "internalType": "uint16"
           },
           {
             "name": "sqrtPriceLimitX96",
@@ -517,11 +618,6 @@ export const routerAbi = [
             "internalType": "uint64"
           }
         ]
-      },
-      {
-        "name": "signature",
-        "type": "bytes",
-        "internalType": "bytes"
       }
     ],
     "outputs": [
@@ -574,86 +670,13 @@ export const routerAbi = [
   },
   {
     "type": "function",
-    "name": "hashIntent",
-    "inputs": [
-      {
-        "name": "it",
-        "type": "tuple",
-        "internalType": "struct FillmarkRouterV2.FillIntent",
-        "components": [
-          {
-            "name": "agentId",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "account",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "installId",
-            "type": "uint64",
-            "internalType": "uint64"
-          },
-          {
-            "name": "tokenIn",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "tokenOut",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "fee",
-            "type": "uint24",
-            "internalType": "uint24"
-          },
-          {
-            "name": "amountIn",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "minOut",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "refSqrtPriceX96",
-            "type": "uint160",
-            "internalType": "uint160"
-          },
-          {
-            "name": "maxDevBps",
-            "type": "uint16",
-            "internalType": "uint16"
-          },
-          {
-            "name": "sqrtPriceLimitX96",
-            "type": "uint160",
-            "internalType": "uint160"
-          },
-          {
-            "name": "nonce",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "deadline",
-            "type": "uint64",
-            "internalType": "uint64"
-          }
-        ]
-      }
-    ],
+    "name": "guardian",
+    "inputs": [],
     "outputs": [
       {
         "name": "",
-        "type": "bytes32",
-        "internalType": "bytes32"
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -769,6 +792,32 @@ export const routerAbi = [
       }
     ],
     "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "markClosing",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "minCardinality",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -917,6 +966,65 @@ export const routerAbi = [
   },
   {
     "type": "function",
+    "name": "poolOf",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct FillmarkRouterV3.PoolCfg",
+        "components": [
+          {
+            "name": "pool",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "fee",
+            "type": "uint24",
+            "internalType": "uint24"
+          },
+          {
+            "name": "capBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "twapCapBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "active",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "poolOff",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "positionOf",
     "inputs": [
       {
@@ -939,7 +1047,7 @@ export const routerAbi = [
       {
         "name": "lot",
         "type": "tuple",
-        "internalType": "struct FillmarkRouterV2.Lot",
+        "internalType": "struct FillmarkRouterV3.Lot",
         "components": [
           {
             "name": "qty",
@@ -956,7 +1064,7 @@ export const routerAbi = [
       {
         "name": "pending",
         "type": "tuple",
-        "internalType": "struct FillmarkRouterV2.Hold",
+        "internalType": "struct FillmarkRouterV3.Hold",
         "components": [
           {
             "name": "gain",
@@ -972,13 +1080,18 @@ export const routerAbi = [
             "name": "until",
             "type": "uint64",
             "internalType": "uint64"
+          },
+          {
+            "name": "esc",
+            "type": "uint128",
+            "internalType": "uint128"
           }
         ]
       },
       {
         "name": "later",
         "type": "tuple",
-        "internalType": "struct FillmarkRouterV2.Hold",
+        "internalType": "struct FillmarkRouterV3.Hold",
         "components": [
           {
             "name": "gain",
@@ -994,13 +1107,18 @@ export const routerAbi = [
             "name": "until",
             "type": "uint64",
             "internalType": "uint64"
+          },
+          {
+            "name": "esc",
+            "type": "uint128",
+            "internalType": "uint128"
           }
         ]
       },
       {
         "name": "movedOut",
         "type": "tuple",
-        "internalType": "struct FillmarkRouterV2.Out",
+        "internalType": "struct FillmarkRouterV3.Out",
         "components": [
           {
             "name": "qty",
@@ -1058,7 +1176,7 @@ export const routerAbi = [
       {
         "name": "f",
         "type": "tuple",
-        "internalType": "struct FillmarkRouterV2.Fill",
+        "internalType": "struct FillmarkRouterV3.Fill",
         "components": [
           {
             "name": "agentId",
@@ -1106,6 +1224,16 @@ export const routerAbi = [
             "internalType": "uint160"
           },
           {
+            "name": "sqrtPriceAfter",
+            "type": "uint160",
+            "internalType": "uint160"
+          },
+          {
+            "name": "twapTick",
+            "type": "int24",
+            "internalType": "int24"
+          },
+          {
             "name": "roundId",
             "type": "uint80",
             "internalType": "uint80"
@@ -1132,7 +1260,7 @@ export const routerAbi = [
       {
         "name": "p",
         "type": "tuple",
-        "internalType": "struct FillmarkRouterV2.Prices",
+        "internalType": "struct FillmarkRouterV3.Prices",
         "components": [
           {
             "name": "nav",
@@ -1176,6 +1304,19 @@ export const routerAbi = [
   },
   {
     "type": "function",
+    "name": "release",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "reputation",
     "inputs": [],
     "outputs": [
@@ -1193,6 +1334,34 @@ export const routerAbi = [
     "inputs": [
       {
         "name": "bps",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setPool",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "pool",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "capBps",
+        "type": "uint16",
+        "internalType": "uint16"
+      },
+      {
+        "name": "twapCapBps",
         "type": "uint16",
         "internalType": "uint16"
       }
@@ -1261,6 +1430,11 @@ export const routerAbi = [
     "outputs": [
       {
         "name": "fills",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "feedbackFails",
         "type": "uint32",
         "internalType": "uint32"
       },
@@ -1345,10 +1519,15 @@ export const routerAbi = [
       {
         "name": "s",
         "type": "tuple",
-        "internalType": "struct FillmarkRouterV2.Stats",
+        "internalType": "struct FillmarkRouterV3.Stats",
         "components": [
           {
             "name": "fills",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "feedbackFails",
             "type": "uint32",
             "internalType": "uint32"
           },
@@ -1398,6 +1577,19 @@ export const routerAbi = [
   },
   {
     "type": "function",
+    "name": "twapWindow",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "uniswapV3SwapCallback",
     "inputs": [
       {
@@ -1433,6 +1625,25 @@ export const routerAbi = [
     "stateMutability": "view"
   },
   {
+    "type": "function",
+    "name": "windowSpent",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "spent",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
     "type": "event",
     "name": "Booked",
     "inputs": [
@@ -1459,6 +1670,25 @@ export const routerAbi = [
         "type": "int256",
         "indexed": false,
         "internalType": "int256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "Claimed",
+    "inputs": [
+      {
+        "name": "to",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
       }
     ],
     "anonymous": false
@@ -1502,6 +1732,25 @@ export const routerAbi = [
   },
   {
     "type": "event",
+    "name": "Credited",
+    "inputs": [
+      {
+        "name": "to",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "DebtPaid",
     "inputs": [
       {
@@ -1533,8 +1782,89 @@ export const routerAbi = [
   },
   {
     "type": "event",
-    "name": "EIP712DomainChanged",
-    "inputs": [],
+    "name": "EscrowReturned",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "agentId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "Escrowed",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "agentId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "stock",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "FeedbackFailed",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "agentId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "fillId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "tag",
+        "type": "string",
+        "indexed": false,
+        "internalType": "string"
+      }
+    ],
     "anonymous": false
   },
   {
@@ -1588,7 +1918,7 @@ export const routerAbi = [
         "name": "fill",
         "type": "tuple",
         "indexed": false,
-        "internalType": "struct FillmarkRouterV2.Fill",
+        "internalType": "struct FillmarkRouterV3.Fill",
         "components": [
           {
             "name": "agentId",
@@ -1636,6 +1966,16 @@ export const routerAbi = [
             "internalType": "uint160"
           },
           {
+            "name": "sqrtPriceAfter",
+            "type": "uint160",
+            "internalType": "uint160"
+          },
+          {
+            "name": "twapTick",
+            "type": "int24",
+            "internalType": "int24"
+          },
+          {
             "name": "roundId",
             "type": "uint80",
             "internalType": "uint80"
@@ -1661,7 +2001,7 @@ export const routerAbi = [
         "name": "prices",
         "type": "tuple",
         "indexed": false,
-        "internalType": "struct FillmarkRouterV2.Prices",
+        "internalType": "struct FillmarkRouterV3.Prices",
         "components": [
           {
             "name": "nav",
@@ -1760,6 +2100,12 @@ export const routerAbi = [
         "type": "uint64",
         "indexed": false,
         "internalType": "uint64"
+      },
+      {
+        "name": "regularOnly",
+        "type": "bool",
+        "indexed": false,
+        "internalType": "bool"
       }
     ],
     "anonymous": false
@@ -1834,6 +2180,56 @@ export const routerAbi = [
   },
   {
     "type": "event",
+    "name": "PoolOff",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PoolSet",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "pool",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "fee",
+        "type": "uint24",
+        "indexed": false,
+        "internalType": "uint24"
+      },
+      {
+        "name": "capBps",
+        "type": "uint16",
+        "indexed": false,
+        "internalType": "uint16"
+      },
+      {
+        "name": "twapCapBps",
+        "type": "uint16",
+        "indexed": false,
+        "internalType": "uint16"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "Settled",
     "inputs": [
       {
@@ -1849,10 +2245,16 @@ export const routerAbi = [
         "internalType": "uint256"
       },
       {
-        "name": "base",
+        "name": "realized",
         "type": "int256",
         "indexed": false,
         "internalType": "int256"
+      },
+      {
+        "name": "openLoss",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
       },
       {
         "name": "peak",
@@ -1926,11 +2328,6 @@ export const routerAbi = [
   },
   {
     "type": "error",
-    "name": "BadSignature",
-    "inputs": []
-  },
-  {
-    "type": "error",
     "name": "CloseOutPending",
     "inputs": []
   },
@@ -1947,11 +2344,6 @@ export const routerAbi = [
   {
     "type": "error",
     "name": "InDebt",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "InvalidShortString",
     "inputs": []
   },
   {
@@ -1976,12 +2368,27 @@ export const routerAbi = [
   },
   {
     "type": "error",
+    "name": "NoTwap",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "NonceUsed",
     "inputs": []
   },
   {
     "type": "error",
     "name": "NotAdmin",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotAgentUnits",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotAgentWallet",
     "inputs": []
   },
   {
@@ -2021,12 +2428,17 @@ export const routerAbi = [
   },
   {
     "type": "error",
-    "name": "PriceMoved",
+    "name": "PriceOutOfRange",
     "inputs": []
   },
   {
     "type": "error",
     "name": "Reentered",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "RegularHoursOnly",
     "inputs": []
   },
   {
@@ -2103,17 +2515,6 @@ export const routerAbi = [
     "type": "error",
     "name": "StockNotAllowed",
     "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "StringTooLong",
-    "inputs": [
-      {
-        "name": "str",
-        "type": "string",
-        "internalType": "string"
-      }
-    ]
   },
   {
     "type": "error",

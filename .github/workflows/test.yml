@@ -32,8 +32,11 @@ jobs:
       - name: Run Forge fmt
         run: forge fmt --check
 
+      # Sizes against Robinhood Chain's contract size limit (profile "chain").
       - name: Run Forge build
         run: forge build --sizes
+        env:
+          FOUNDRY_PROFILE: chain
 
       # Fork tests need a mainnet RPC; they run only when the FILLMARK_RPC secret is set.
       - name: Run Forge tests

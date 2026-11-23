@@ -1,20 +1,24 @@
 // Fillmark reference agent: dollar-cost averaging with take-profit for every client account
-// that installed this agent on router v2. Clients and their limits are read from chain.
+// that installed this agent on router v3. Clients and their limits are read from chain.
 // Each UTC day, for each asset the client allowed:
 // - when the Chainlink price is at least takeProfitBps above the average cost of the units
 //   this agent bought for the account (the router's lot), the agent sells, again and again
-//   that day, each sale about the client's per-trade limit, until the lot is sold or the
-//   daily limit is reached. It never sells more than the lot, and never receives less,
+//   that day, each sale about the client's per-trade limit, until the lot is sold. Sales do
+//   not use the daily limit (router v3 counts buys only). It never sells more than the lot, and never receives less,
 //   after the fill fee, than the cost of the units sold. That day it does not buy the asset;
 //   it buys instead only when not even one sale fits between the router's 10 USDG minimum
 //   and the per-trade limit;
-// - otherwise it buys the client's per-trade limit in USDG once, while the daily limit, the
-//   USDG balance (per-trade limit plus the router's fill fee) and the router allow it.
+// - otherwise it buys once: the client's per-trade limit in USDG, or less so that the buy and
+//   its fill fee fit what is left of the router's rolling 24-hour limit (windowSpent), and at
+//   least the router's 10 USDG minimum, while the USDG balance and the router allow it.
 // After a day with a sale of an asset it buys none of it for the router's hold in whole days
 // (7): a buy within the hold would take the sale's waiting gain off the units' cost.
-// Stocks trade in the regular session only (unless allowExtended), crypto at any hour.
-// Every fee tier is quoted with Uniswap's QuoterV2, and the best one the router accepts in
-// simulation is sent. Nonces come from the account, asset and day (and the sale's number),
+// Stocks trade in the regular session only (unless allowExtended and the client did not ask
+// for regular hours only), crypto at any hour. Router v3 trades each token in one official
+// pool and bounds its price itself; the agent quotes that pool with Uniswap's QuoterV2,
+// simulates, and sends the fill from its own wallet (v3 takes no signature). After expiry the
+// router allows sales for 7 more days, so the agent still takes profit then, and buys nothing.
+// Nonces come from the account, asset and day (and the sale's number),
 // and an intent expires at the end of its day, so a restart, a retry or a client changing
 // its limits can never buy an asset twice in one day or repeat a sale.
 import { readFileSync } from "node:fs";
@@ -37,17 +41,14 @@ import {
 import type { PrivateKeyAccount } from "viem/accounts";
 import { feedsAbi, routerAbi } from "./abi.generated.js";
 import {
-  FEE_TIERS,
   IDENTITY,
   KERNEL_IMPL,
   SESSIONS,
   ASSETS,
-  UNISWAP_FACTORY,
   USDG,
   aggregatorAbi,
   checkedNow,
   clients,
-  factoryAbi,
   identityAbi,
   loadKey,
   log,
@@ -56,7 +57,7 @@ import {
   quoterAbi,
   revertName,
 } from "./chain.js";
-import { signIntent, type FillIntent } from "./intent.js";
+import type { FillIntent } from "./intent.js";
 
 export const DAY = 86_400n;
 const MIN_NOTIONAL = 10_000_000n; // FillmarkRouter.MIN_NOTIONAL, 10 USDG
@@ -64,7 +65,10 @@ const LOG_CHUNK = 5_000_000n;
 const RESCAN = 200n; // blocks scanned again each tick, for a lagging node or a reorg
 const RETRY_SEC = 900n;
 const FEED_MARGIN_BPS = 50; // room left in a sale's size for a Chainlink update before it lands
-const GAS_CAP = 1_200_000n; // v2 fills use about 0.63M (sale) to 0.85M (first buy of a token) in fork tests
+// v3 fills use about 0.70M (sale) to 0.92M (first buy of a token) in fork tests. A fill is sent
+// with this fixed limit, never the bare estimate: its gas changes with the block time, and one
+// second later the estimate can leave too little for the feedback call (LowGas).
+export const GAS_CAP = 1_500_000n;
 const BATCH = 32_768; // multicall calldata bytes per eth_call
 // Solady's ERC1967 proxy, the runtime code of every Kernel account the factory deploys.
 const PROXY_CODE: Hex = "0x363d3d373d3d363d7f360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc545af43d6000803e6038573d6000fd5b3d6000f3";
@@ -90,7 +94,7 @@ export type Config = {
   previousRouterUntilDay: bigint; // up to this UTC day a buy there counts as that day's buy
   minPerfFeeBps: number; // clients who installed with a lower performance fee are not served
   tickSec: number;
-  maxDevBps: number; // pool price may move this much between quote and fill
+  maxDevBps: number; // room for the pool to move between quote and fill when a sale is sized
   minOutBufferBps: number; // minOut sits this far below the simulated output
   deadlineSec: number;
   allowExtended: boolean;
@@ -201,13 +205,24 @@ type Client = {
   maxSlipBps: number;
   maxPerTrade: bigint;
   fillFeeBps: bigint;
-  fillFee: bigint; // USDG the router sends to the burner on a buy of maxPerTrade
   dailyLimit: bigint;
-  spent: bigint; // spent today, as the router counts it
+  spent: bigint; // the router's windowSpent: buys and their fill fees in the last 24 hours
   balance: bigint; // USDG
   debt: bigint; // fees owed to this agent: the router rejects buys until it is paid
+  buys: boolean; // false after expiry: the router allows sales only, for SELL_GRACE
+  regularOnly: boolean; // the client allowed fills in the regular session only
 };
 
+/// The largest buy whose USDG and fill fee fit both the per-trade limit and what is left of
+/// the rolling limit; 0 when less than the router's 10 USDG minimum fits.
+export function buyAmount(maxPerTrade: bigint, dailyLimit: bigint, spent: bigint, fillFeeBps: bigint): bigint {
+  if (spent >= dailyLimit) return 0n;
+  const room = ((dailyLimit - spent) * 10_000n) / (10_000n + fillFeeBps);
+  const a = room < maxPerTrade ? room : maxPerTrade;
+  return a < MIN_NOTIONAL ? 0n : a;
+}
+
+type Pool = { pool: Address; fee: number }; // the router's official pool of a token
 type Price = { answer: bigint; decimals: number }; // Chainlink answer (8 decimals) and the token's decimals
 type Lot = { qty: bigint; cost: bigint }; // the router's lot: units this agent bought for the account, and their cost
 type Result = "filled" | "retry" | "skip" | "small"; // small: no sale fits the limits, buy instead
@@ -219,6 +234,7 @@ export class Agent {
   private readonly wallet;
   private feeds: Address = zeroAddress;
   private pauseDays = 0n; // days without a buy of an asset after a sale of it: the router's hold, rounded up
+  private sellGrace = 0n; // seconds after expiry in which the router still allows sales
   private chainId = 0;
   private readonly candidates: Address[] = []; // accounts installed for this agent, in install order
   private readonly installedAt = new Map<Address, bigint>(); // latest Installed block seen
@@ -261,6 +277,7 @@ export class Agent {
     this.feeds = await this.pub.readContract({ address: this.cfg.router, abi: routerAbi, functionName: "feeds" });
     const hold = BigInt(await this.pub.readContract({ address: this.cfg.router, abi: routerAbi, functionName: "hold" }));
     this.pauseDays = (hold + DAY - 1n) / DAY;
+    this.sellGrace = BigInt(await this.pub.readContract({ address: this.cfg.router, abi: routerAbi, functionName: "SELL_GRACE" }));
     log("info", "agent ready", { agentId: this.cfg.agentId, wallet, router: this.cfg.router, maxFillsPerDay: this.cfg.maxFillsPerDay });
   }
 
@@ -345,8 +362,8 @@ export class Agent {
     return this.fillsToday.size + this.revertedToday;
   }
 
-  /// Accounts open to this agent today, for a buy or a sale. Accounts no longer installed
-  /// for it are dropped: installing again emits a new Installed event.
+  /// Accounts open to this agent now, for a buy or a sale. Accounts no longer installed for
+  /// it, or past expiry and its sale grace, are dropped: installing again emits Installed.
   private async clients(now: bigint): Promise<Client[]> {
     const { router, agentId } = this.cfg;
     if (this.candidates.length === 0) return [];
@@ -360,17 +377,19 @@ export class Agent {
         { address: router, abi: routerAbi, functionName: "configs", args: [account] } as const,
         { address: USDG, abi: erc20Abi, functionName: "balanceOf", args: [account] } as const,
         { address: router, abi: routerAbi, functionName: "bookOf", args: [account, agentId] } as const,
+        { address: router, abi: routerAbi, functionName: "windowSpent", args: [account] } as const,
       ]),
     });
     const day = now / DAY;
     const served: Client[] = [];
     list.forEach((account, i) => {
-      const [id, wallet, maxSlipBps, perfFeeBps, expiry, installId, installed, maxPerTrade, dailyLimit, spentToday, cDay] = reads[3 * i] as readonly [
-        bigint, Address, number, number, bigint, bigint, boolean, bigint, bigint, bigint, bigint,
+      const [id, wallet, maxSlipBps, perfFeeBps, expiry, installId, installed, regularOnly, maxPerTrade, dailyLimit] = reads[4 * i] as readonly [
+        bigint, Address, number, number, bigint, bigint, boolean, boolean, bigint, bigint,
       ];
-      const balance = reads[3 * i + 1] as bigint;
-      const { debt } = reads[3 * i + 2] as { debt: bigint };
-      if (!installed || id !== agentId || wallet !== this.key.address || expiry <= now) {
+      const balance = reads[4 * i + 1] as bigint;
+      const { debt } = reads[4 * i + 2] as { debt: bigint };
+      const spent = reads[4 * i + 3] as bigint;
+      if (!installed || id !== agentId || wallet !== this.key.address || expiry + this.sellGrace < now) {
         // A fresh install may not be visible yet on the node that answered: drop only
         // accounts whose last install is older than the rescanned overlap.
         if ((this.installedAt.get(account) ?? 0n) < this.scanned - RESCAN) {
@@ -380,8 +399,7 @@ export class Agent {
         }
         return;
       }
-      const fillFee = (maxPerTrade * fillFeeBps) / 10_000n;
-      if (maxPerTrade < MIN_NOTIONAL || dailyLimit < maxPerTrade) return;
+      if (maxPerTrade < MIN_NOTIONAL) return;
       if (this.banned.has(`${day}:${account}`)) return;
       if (perfFeeBps < this.cfg.minPerfFeeBps) {
         this.once("day", `perf:${account}`, "info", "installed with a lower performance fee than this agent asks, not served", { account, perfFeeBps });
@@ -391,7 +409,9 @@ export class Agent {
         // The router rejects every buy (InDebt) until a sale or the client pays it.
         this.once("day", `debt:${account}`, "info", "account owes this agent fees, sales only", { account, debt });
       }
-      served.push({ account, installId, maxSlipBps, maxPerTrade, fillFeeBps, fillFee, dailyLimit, spent: cDay === day ? spentToday : 0n, balance, debt });
+      const buys = expiry >= now;
+      if (!buys) this.once("day", `expired:${account}`, "info", "permission expired, sales only until the router's grace ends", { account, expiry });
+      served.push({ account, installId, maxSlipBps, maxPerTrade, fillFeeBps, dailyLimit, spent, balance, debt, buys, regularOnly });
     });
     const key = served.map((c) => c.account).join(",");
     if (key !== this.servedKey) {
@@ -466,6 +486,7 @@ export class Agent {
       contracts: tokens.map((t) => ({ address: this.feeds, abi: feedsAbi, functionName: "sourceOf", args: [t, now] }) as const),
     });
     const feedOf = new Map<Address, { feed: Address; maxAge: number; decimals: number }>();
+    const extended = new Set<Address>(); // tokens in the extended session now
     const open = tokens.filter((token, i) => {
       const s = sources[i];
       if (s.status !== "success") {
@@ -474,11 +495,25 @@ export class Agent {
       }
       feedOf.set(token, { feed: s.result.feed, maxAge: s.result.maxAge, decimals: s.result.decimals });
       const session = SESSIONS[s.result.session];
+      if (session === "Extended") extended.add(token);
       return session === "Regular" || (session === "Extended" && this.cfg.allowExtended);
     });
-    const rounds = await this.pub.multicall({
-      batchSize: BATCH,
-      contracts: open.map((t) => ({ address: feedOf.get(t)!.feed, abi: aggregatorAbi, functionName: "latestRoundData" }) as const),
+    const [rounds, pools] = await Promise.all([
+      this.pub.multicall({
+        batchSize: BATCH,
+        contracts: open.map((t) => ({ address: feedOf.get(t)!.feed, abi: aggregatorAbi, functionName: "latestRoundData" }) as const),
+      }),
+      this.pub.multicall({
+        allowFailure: false,
+        batchSize: BATCH,
+        contracts: open.map((t) => ({ address: this.cfg.router, abi: routerAbi, functionName: "poolOf", args: [t] }) as const),
+      }),
+    ]);
+    const poolOf = new Map<Address, Pool>(); // the router's official pool, when switched on
+    open.forEach((token, i) => {
+      const p = pools[i] as { pool: Address; fee: number; active: boolean };
+      if (p.active) poolOf.set(token, { pool: p.pool, fee: p.fee });
+      else this.once("day", `pool:${token}`, "info", "the router has no active pool for this asset, skipping", { asset: TICKER[token] });
     });
     const priceOf = new Map<Address, Price>();
     open.forEach((token, i) => {
@@ -496,7 +531,8 @@ export class Agent {
       if (r.result[1] <= 0n) return;
       priceOf.set(token, { answer: r.result[1], decimals: src.decimals });
     });
-    const todo = pairs.filter((t) => priceOf.has(t.token));
+    // A client that asked for regular hours only is not traded in the extended session.
+    const todo = pairs.filter((t) => priceOf.has(t.token) && poolOf.has(t.token) && !(t.c.regularOnly && extended.has(t.token)));
     if (todo.length === 0) return;
 
     const previous = this.cfg.previousRouter !== zeroAddress && day <= this.cfg.previousRouterUntilDay;
@@ -560,10 +596,6 @@ export class Agent {
         this.once("day", "cap", "warn", "daily fill cap reached, no more trades today", { maxFillsPerDay: this.cfg.maxFillsPerDay });
         return;
       }
-      if (c.spent + c.maxPerTrade > c.dailyLimit) {
-        this.once("day", `limit:${t.key}`, "info", "daily limit reached", { account: c.account, asset: TICKER[t.token] });
-        continue;
-      }
       let [lot] = held[2 * i] as readonly [Lot, ...unknown[]];
       let balance = held[2 * i + 1] as bigint;
       const price = priceOf.get(t.token)!;
@@ -579,8 +611,16 @@ export class Agent {
         this.once("day", `pause:${t.key}`, "info", "sold in the last days: no buy until the router's hold ends", { account: c.account, asset: TICKER[t.token], pauseDays: this.pauseDays });
         continue;
       }
+      const amount = c.buys ? buyAmount(c.maxPerTrade, c.dailyLimit, c.spent, c.fillFeeBps) : 0n;
+      const fee = (amount * c.fillFeeBps) / 10_000n;
+      if (!sell && !c.buys) continue;
       if (!sell && c.debt > 0n) continue;
-      if (!sell && c.balance < c.maxPerTrade + c.fillFee) {
+      if (!sell && amount === 0n) {
+        this.once("day", `limit:${t.key}`, "info", "daily limit reached", { account: c.account, asset: TICKER[t.token] });
+        this.retryAt.set(t.key, now + RETRY_SEC); // the rolling window frees room over time
+        continue;
+      }
+      if (!sell && c.balance < amount + fee) {
         this.once("day", `funds:${t.key}`, "info", "not enough USDG for another buy today", { account: c.account, asset: TICKER[t.token] });
         continue;
       }
@@ -603,14 +643,13 @@ export class Agent {
           while (sales < MAX_SALES_PER_TICK) {
             while (await this.pub.readContract({ address: this.cfg.router, abi: nonceAbi, functionName: "nonceUsed", args: [c.account, saleNonce(c.account, t.token, day, n)] })) n++;
             this.saleNext.set(t.key, n);
-            r = await this.sell(c, t.token, units, lot, price, day, at, t.key, saleNonce(c.account, t.token, day, n));
+            r = await this.sell(c, t.token, poolOf.get(t.token)!, units, lot, price, day, at, t.key, saleNonce(c.account, t.token, day, n));
             if (r !== "filled") break;
             sales++;
             n++;
             this.saleNext.set(t.key, n);
-            c.spent += c.maxPerTrade; // at most this: a sale counts the larger of its USDG and its NAV value
             fills = this.fillsToday.size + this.revertedToday;
-            if (fills >= this.cfg.maxFillsPerDay || c.spent + c.maxPerTrade > c.dailyLimit) break;
+            if (fills >= this.cfg.maxFillsPerDay) break;
             const [pos, bal] = await this.pub.multicall({
               allowFailure: false,
               contracts: [
@@ -642,23 +681,25 @@ export class Agent {
             this.once("day", `small:${t.key}`, "info", "take-profit reached but no sale fits between 10 USDG and the per-trade limit", {
               account: c.account, asset: TICKER[t.token], units,
             });
-            if (c.debt > 0n) {
-              this.banned.add(t.key); // no sale fits and the router refuses buys: nothing to do today
+            if (c.debt > 0n || amount === 0n) {
+              this.banned.add(t.key); // no sale fits and no buy is possible: nothing to do today
               continue;
             }
-            if (c.balance < c.maxPerTrade + c.fillFee) {
+            if (c.balance < amount + fee) {
               this.once("day", `funds:${t.key}`, "info", "not enough USDG for another buy today", { account: c.account, asset: TICKER[t.token] });
               this.retryAt.set(t.key, now + RETRY_SEC);
               continue;
             }
           }
-          r = await this.buy(c, t.token, day, at, t.key);
-          if (r === "filled") c.balance -= c.maxPerTrade + c.fillFee;
+          r = await this.buy(c, t.token, poolOf.get(t.token)!, amount, day, at, t.key);
+          if (r === "filled") {
+            c.balance -= amount + fee;
+            c.spent += amount + fee;
+          }
         }
         if (r !== "retry") fills = this.fillsToday.size + this.revertedToday;
         if (r === "filled") {
           this.done.add(t.key);
-          c.spent += c.maxPerTrade;
           continue;
         }
         if (r === "skip") continue;
@@ -681,63 +722,48 @@ export class Agent {
     return true;
   }
 
-  /// Quotes every fee tier and sends the best one the router accepts. "skip" leaves the
-  /// pair for the day; "retry" means no tier fills now.
-  private async buy(c: Client, token: Address, day: bigint, now: bigint, key: string): Promise<Result> {
+  /// Quotes the router's official pool for `amountIn` USDG and sends the buy. The router
+  /// bounds the pool price after the swap against NAV and the pool's TWAP; a buy it would
+  /// refuse fails in simulation and is tried again later ("retry").
+  private async buy(c: Client, token: Address, { pool, fee }: Pool, amountIn: bigint, day: bigint, now: bigint, key: string): Promise<Result> {
     const asset = TICKER[token];
-    const amountIn = c.maxPerTrade;
-    // Quotes come from Uniswap's QuoterV2 and need no signature. An intent is signed only
-    // for a tier about to be tried, with that tier's minOut and the day's nonce.
-    const quotes: { fee: number; pool: Address; out: bigint }[] = [];
-    for (const fee of FEE_TIERS) {
-      const pool = await this.pub.readContract({ address: UNISWAP_FACTORY, abi: factoryAbi, functionName: "getPool", args: [USDG, token, fee] });
-      if (pool === zeroAddress) continue;
-      const [sqrtP] = await this.pub.readContract({ address: pool, abi: poolAbi, functionName: "slot0" });
-      try {
-        const { result } = await this.pub.simulateContract({
-          address: QUOTER_V2,
-          abi: quoterAbi,
-          functionName: "quoteExactInputSingle",
-          args: [{ tokenIn: USDG, tokenOut: token, amountIn, fee, sqrtPriceLimitX96: buyLimit(sqrtP, token, c.maxSlipBps) }],
-        });
-        quotes.push({ fee, pool, out: result[0] });
-      } catch (err) {
-        this.once("day", `quote:${key}:${fee}:${revertName(err)}`, "info", "no quote", { asset, fee, error: revertName(err) });
-      }
+    const [sqrtP] = await this.pub.readContract({ address: pool, abi: poolAbi, functionName: "slot0" });
+    const limit = buyLimit(sqrtP, token, c.maxSlipBps);
+    let out: bigint;
+    try {
+      ({ result: [out] } = await this.pub.simulateContract({
+        address: QUOTER_V2,
+        abi: quoterAbi,
+        functionName: "quoteExactInputSingle",
+        args: [{ tokenIn: USDG, tokenOut: token, amountIn, fee, sqrtPriceLimitX96: limit }],
+      }));
+    } catch (err) {
+      this.once("day", `quote:${key}:${revertName(err)}`, "info", "no quote", { asset, error: revertName(err) });
+      return "retry";
     }
-    quotes.sort((a, b) => (a.out < b.out ? 1 : a.out > b.out ? -1 : 0));
-
-    // Best quote first; a tier the router rejects (e.g. worse than NAV) falls to the next.
-    for (const q of quotes) {
-      const [sqrtP] = await this.pub.readContract({ address: q.pool, abi: poolAbi, functionName: "slot0" });
-      const r = await this.send(c, key, asset, {
-        agentId: this.cfg.agentId,
-        account: c.account,
-        installId: c.installId,
-        tokenIn: USDG,
-        tokenOut: token,
-        fee: q.fee,
-        amountIn,
-        minOut: (q.out * BigInt(10_000 - this.cfg.minOutBufferBps)) / 10_000n,
-        refSqrtPriceX96: sqrtP,
-        maxDevBps: this.cfg.maxDevBps,
-        sqrtPriceLimitX96: buyLimit(sqrtP, token, c.maxSlipBps),
-        nonce: buyNonce(c.account, token, day),
-        deadline: this.deadline(now, day),
-      });
-      if (r !== "rejected") return r;
-    }
-    this.once("day", `nofill:${key}`, "warn", "no fee tier can fill", { account: c.account, asset, quotes: quotes.length });
-    return "retry";
+    const r = await this.send(c, key, asset, {
+      agentId: this.cfg.agentId,
+      account: c.account,
+      installId: c.installId,
+      tokenIn: USDG,
+      tokenOut: token,
+      amountIn,
+      minOut: (out * BigInt(10_000 - this.cfg.minOutBufferBps)) / 10_000n,
+      sqrtPriceLimitX96: limit,
+      nonce: buyNonce(c.account, token, day),
+      deadline: this.deadline(now, day),
+    });
+    return r === "rejected" ? "retry" : r;
   }
 
-  /// Sells up to `units` of the lot. The sale is sized so the router's count, the larger of
-  /// the USDG received and the NAV value, stays inside the per-trade limit even if the pool
-  /// moves by maxDevBps or the feed by FEED_MARGIN_BPS before it lands, and so its minOut
-  /// is at least the router's 10 USDG minimum and, after the fill fee, the cost of the units
-  /// sold: a take-profit sale never sells below cost. "small": no tier can sell an amount in
-  /// that range, so the agent buys instead. "retry": no tier pays enough now.
-  private async sell(c: Client, token: Address, units: bigint, lot: Lot, price: Price, day: bigint, now: bigint, key: string, nonce: bigint): Promise<Result> {
+  /// Sells up to `units` of the lot in the router's official pool. The sale is sized so the
+  /// router's per-trade count, the larger of the USDG received and the NAV value, stays inside
+  /// the limit even if the pool moves by maxDevBps or the feed by FEED_MARGIN_BPS before it
+  /// lands, and so its minOut is at least the router's 10 USDG minimum and, after the fill fee,
+  /// the cost of the units sold: a take-profit sale never sells below cost. "small": no amount
+  /// in that range can be sold, so the agent buys instead. "retry": the pool pays too little
+  /// now, or the router refuses the sale.
+  private async sell(c: Client, token: Address, { pool, fee }: Pool, units: bigint, lot: Lot, price: Price, day: bigint, now: bigint, key: string, nonce: bigint): Promise<Result> {
     const asset = TICKER[token];
     const capOut = (c.maxPerTrade * BigInt(10_000 - this.cfg.maxDevBps - FEED_MARGIN_BPS)) / 10_000n;
     const capUnits = (capOut * 10n ** BigInt(price.decimals + 2)) / price.answer; // units worth capOut at NAV
@@ -747,70 +773,49 @@ export class Agent {
       const cost = (lot.cost * qty + lot.qty - 1n) / lot.qty; // the lot's cost of qty units, rounded up
       return (cost * 10_000n + 10_000n - c.fillFeeBps - 1n) / (10_000n - c.fillFeeBps); // gross whose net covers it
     };
-    const quotes: { fee: number; pool: Address; sqrtP: bigint; qty: bigint; out: bigint; minOut: bigint }[] = [];
-    let small = false;
-    let belowCost = false;
-    for (const fee of FEE_TIERS) {
-      const pool = await this.pub.readContract({ address: UNISWAP_FACTORY, abi: factoryAbi, functionName: "getPool", args: [token, USDG, fee] });
-      if (pool === zeroAddress) continue;
-      const [sqrtP] = await this.pub.readContract({ address: pool, abi: poolAbi, functionName: "slot0" });
-      const quote = async (qty: bigint) =>
-        (await this.pub.simulateContract({
-          address: QUOTER_V2,
-          abi: quoterAbi,
-          functionName: "quoteExactInputSingle",
-          args: [{ tokenIn: token, tokenOut: USDG, amountIn: qty, fee, sqrtPriceLimitX96: sellLimit(sqrtP, token, c.maxSlipBps) }],
-        })).result[0];
-      try {
-        let qty = want;
-        let out = await quote(qty);
-        // The pool pays more than NAV: sell fewer units. A smaller sale gets a slightly better
-        // average price, so shrink a little more than in proportion, a few times at most.
-        for (let i = 0; i < 4 && out > capOut && qty > 0n; i++) {
-          qty = (qty * capOut * 9_999n) / (out * 10_000n);
-          if (qty > 0n) out = await quote(qty);
-        }
-        const minOut = (out * BigInt(10_000 - this.cfg.minOutBufferBps)) / 10_000n;
-        if (qty === 0n || out > capOut || minOut < MIN_NOTIONAL || navValue(qty, price.answer, price.decimals) > capOut) {
-          small = true;
-          continue;
-        }
-        const floor = floorFor(qty);
-        if (minOut < floor) {
-          belowCost = true;
-          this.once("hour", `cost:${key}:${fee}`, "info", "sale would not cover the lot's cost, not sold", { account: c.account, asset, fee, minOut, floor });
-          continue;
-        }
-        quotes.push({ fee, pool, sqrtP, qty, out, minOut });
-      } catch (err) {
-        this.once("day", `squote:${key}:${fee}:${revertName(err)}`, "info", "no sale quote", { asset, fee, error: revertName(err) });
+    const [sqrtP] = await this.pub.readContract({ address: pool, abi: poolAbi, functionName: "slot0" });
+    const limit = sellLimit(sqrtP, token, c.maxSlipBps);
+    const quote = async (qty: bigint) =>
+      (await this.pub.simulateContract({
+        address: QUOTER_V2,
+        abi: quoterAbi,
+        functionName: "quoteExactInputSingle",
+        args: [{ tokenIn: token, tokenOut: USDG, amountIn: qty, fee, sqrtPriceLimitX96: limit }],
+      })).result[0];
+    let qty = want;
+    let out: bigint;
+    try {
+      out = await quote(qty);
+      // The pool pays more than NAV: sell fewer units. A smaller sale gets a slightly better
+      // average price, so shrink a little more than in proportion, a few times at most.
+      for (let i = 0; i < 4 && out > capOut && qty > 0n; i++) {
+        qty = (qty * capOut * 9_999n) / (out * 10_000n);
+        if (qty > 0n) out = await quote(qty);
       }
+    } catch (err) {
+      this.once("day", `squote:${key}:${revertName(err)}`, "info", "no sale quote", { asset, error: revertName(err) });
+      return "retry";
     }
-    if (quotes.length === 0) return small && !belowCost ? "small" : "retry";
-    // Best price per unit first.
-    quotes.sort((a, b) => (a.out * b.qty < b.out * a.qty ? 1 : a.out * b.qty > b.out * a.qty ? -1 : 0));
-    for (const q of quotes) {
-      // The reference is the price the sale was sized at, so the router's maxDevBps check
-      // holds the pool to the range the size allows for.
-      const r = await this.send(c, key, asset, {
-        agentId: this.cfg.agentId,
-        account: c.account,
-        installId: c.installId,
-        tokenIn: token,
-        tokenOut: USDG,
-        fee: q.fee,
-        amountIn: q.qty,
-        minOut: q.minOut,
-        refSqrtPriceX96: q.sqrtP,
-        maxDevBps: this.cfg.maxDevBps,
-        sqrtPriceLimitX96: sellLimit(q.sqrtP, token, c.maxSlipBps),
-        nonce,
-        deadline: this.deadline(now, day),
-      });
-      if (r !== "rejected") return r;
+    const minOut = (out * BigInt(10_000 - this.cfg.minOutBufferBps)) / 10_000n;
+    if (qty === 0n || out > capOut || minOut < MIN_NOTIONAL || navValue(qty, price.answer, price.decimals) > capOut) return "small";
+    const floor = floorFor(qty);
+    if (minOut < floor) {
+      this.once("hour", `cost:${key}`, "info", "sale would not cover the lot's cost, not sold", { account: c.account, asset, minOut, floor });
+      return "retry";
     }
-    this.once("day", `nosale:${key}`, "warn", "no fee tier can sell", { account: c.account, asset, quotes: quotes.length });
-    return "retry";
+    const r = await this.send(c, key, asset, {
+      agentId: this.cfg.agentId,
+      account: c.account,
+      installId: c.installId,
+      tokenIn: token,
+      tokenOut: USDG,
+      amountIn: qty,
+      minOut,
+      sqrtPriceLimitX96: limit,
+      nonce,
+      deadline: this.deadline(now, day),
+    });
+    return r === "rejected" ? "retry" : r;
   }
 
   /// An intent's deadline: deadlineSec from now, and never after its day ends.
@@ -820,21 +825,21 @@ export class Agent {
     return d < end ? d : end;
   }
 
-  /// Signs, simulates and sends one intent. "rejected": the router refuses this tier in
-  /// simulation, try the next one. All intents of a pair carry the day's nonce and expire
-  /// with the day, so at most one executes, and only on that day.
+  /// Simulates and sends one intent from the agent wallet. "rejected": the router refuses it
+  /// in simulation (a price bound, for example); it is tried again later. All intents of a
+  /// pair carry the day's nonce and expire with the day, so at most one executes, and only
+  /// on that day.
   private async send(c: Client, key: string, asset: string, it: FillIntent): Promise<"filled" | "skip" | "rejected"> {
     const { router } = this.cfg;
     const side = it.tokenIn === USDG ? "buy" : "sell";
-    const sig = await signIntent(this.key, router, this.chainId, it);
     let request;
     try {
-      ({ request } = await this.pub.simulateContract({ address: router, abi: routerAbi, functionName: "execute", args: [it, sig], account: this.key }));
+      ({ request } = await this.pub.simulateContract({ address: router, abi: routerAbi, functionName: "execute", args: [it], account: this.key }));
     } catch (err) {
-      this.once("day", `tier:${key}:${it.fee}:${revertName(err)}`, "info", "fee tier rejected", { account: c.account, asset, side, fee: it.fee, error: revertName(err) });
+      this.once("hour", `rejected:${key}:${side}:${revertName(err)}`, "info", "router refused the fill now", { account: c.account, asset, side, error: revertName(err) });
       return "rejected";
     }
-    const gas = await this.pub.estimateContractGas({ address: router, abi: routerAbi, functionName: "execute", args: [it, sig], account: this.key });
+    const gas = await this.pub.estimateContractGas({ address: router, abi: routerAbi, functionName: "execute", args: [it], account: this.key });
     if (gas > GAS_CAP) {
       this.banned.add(key);
       this.once("day", `gas:${key}`, "warn", "fill needs more gas than the cap, skipped today", { account: c.account, asset, side, gas, cap: GAS_CAP });
@@ -851,17 +856,16 @@ export class Agent {
       log("error", "fill reverted on chain, account skipped today", { account: c.account, asset, side, tx: hash, gasUsed: receipt.gasUsed });
       return "skip";
     }
-    const [filled] = parseEventLogs({
-      abi: routerAbi,
-      eventName: "Filled",
-      logs: receipt.logs.filter((l) => getAddress(l.address) === router),
-    });
+    const logs = receipt.logs.filter((l) => getAddress(l.address) === router);
+    const [filled] = parseEventLogs({ abi: routerAbi, eventName: "Filled", logs });
     this.fillsToday.add(`${hash}:${filled.logIndex}`);
+    const refused = parseEventLogs({ abi: routerAbi, eventName: "FeedbackFailed", logs }).length;
+    if (refused > 0) log("warn", "the registry refused this fill's feedback", { account: c.account, asset, tx: hash, refused });
     log("info", "filled", {
       account: c.account,
       asset,
       side,
-      fee: it.fee,
+      pool: filled.args.pool,
       usdg: filled.args.fill.usdgAmount,
       fillFee: filled.args.fill.fillFee,
       assetAmount: filled.args.fill.stockAmount,
