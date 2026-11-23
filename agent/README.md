@@ -2,15 +2,26 @@
 
 TypeScript (viem) tools for FillmarkRouterV2 on Robinhood Chain (4663).
 
-- `src/agent.ts`: DCA agent. It finds its clients on chain: every account whose router
-  config names this agent (found through the router's `Installed` events from
-  `deployBlock`), is not expired, owes this agent no fees, installed it with a performance
-  fee of at least `minPerfFeeBps` (default 0), and holds at least one trade's USDG plus
-  the router's fill fee (3 bps, sent to the burner). Once per UTC day,
-  for each asset the client allowed, it buys the client's per-trade limit, while the
-  daily limit and the balance allow it. At most `maxFillsPerDay` (default 300) buys are
-  sent per day across all clients, counted from the router's `Filled` events so the cap
-  holds across restarts, and buys go round robin (every account's first asset, then every
+- `src/agent.ts`: DCA agent with take-profit. It finds its clients on chain: every account
+  whose router config names this agent (found through the router's `Installed` events
+  from `deployBlock`), is not expired, and installed it with a performance fee of at least
+  `minPerfFeeBps` (default 0). Each UTC day, for each asset the client allowed:
+  - when the Chainlink price is at least `takeProfitBps` (default 500, 5%; at least 1)
+    above the average cost of the units this agent bought for the account (the router's
+    lot, read with `positionOf`), it sells, again and again that day, until the lot is
+    sold or the daily limit is reached. Each sale is about the client's per-trade limit,
+    or the rest of the lot if worth less, and never more than the lot, so units the client
+    sent itself stay. A sale is sized so the USDG received and its NAV value stay inside
+    the per-trade limit even if the pool moves by `maxDevBps` or the feed by 0.5% before
+    it lands, and its `minOut` is at least the router's 10 USDG minimum and, after the
+    fill fee, the cost of the units sold, so a sale never sells below cost. A day with a
+    sale has no buy of that asset. When not even one sale fits (a per-trade limit under
+    about 10.2 USDG, or a lot worth less than 10 USDG), the agent buys instead;
+  - otherwise it buys the client's per-trade limit once, when the account holds that USDG
+    plus the router's fill fee (3 bps, sent to the burner) and owes this agent no fees.
+  Both count toward the client's daily limit. At most `maxFillsPerDay` (default 300) fills
+  are sent per day across all clients, counted from the router's `Filled` events so the cap
+  holds across restarts, and pairs go round robin (every account's first asset, then every
   account's second) so no single account takes the whole cap. Only Kernel accounts on the
   known implementation with no executor hook are traded, and each fill is sent with a
   1.2M gas cap, so no account can make a fill burn the agent's ETH; an account whose fill
@@ -21,17 +32,15 @@ TypeScript (viem) tools for FillmarkRouterV2 on Robinhood Chain (4663).
   whose feed is older than its max age, or unreadable, is skipped and logged. Every fee
   tier is quoted with Uniswap's QuoterV2 (no signature needed), and the best tier the
   router accepts in simulation is sent with `minOut` set `minOutBufferBps` below its
-  quote. An intent is signed only for a tier about to be tried, with that tier's `minOut`
-  and the day's nonce, and expires at the end of that UTC day, so at most one fills, on
-  that day. The nonce comes from the account, asset and day, so retries, restarts and a
-  client changing its limits cannot buy the same asset twice in one day; up to
-  `previousRouterUntilDay` a buy under the same nonce on `previousRouter` (the v1 router
-  clients move from) also counts, so the day a client moves never buys twice. The agent
-  only buys, so it never realizes a gain and never charges a performance fee. Quotes and
-  fills stop at `maxSlipBps` above the pool's spot price, which is stricter than the
-  router's NAV bound: a buy too large for the pool depth inside that range never fills,
-  is logged once as "no fee tier can fill" and is tried again every 15 minutes. Config:
-  see `agent.example.json`.
+  quote. An intent is signed only for a tier about to be tried and expires at the end of
+  its UTC day. A buy's nonce comes from the account, asset and day, and a sale's also from
+  its number that day, so retries, restarts and a client changing its limits can never
+  buy an asset twice in one day or repeat a sale; up to `previousRouterUntilDay` a buy
+  under the same nonce on `previousRouter` (the v1 router clients move from) also counts,
+  so the day a client moves never buys twice. Quotes and fills stop at `maxSlipBps` from
+  the pool's spot price, which is stricter than the router's NAV bound: a trade too large
+  for the pool depth inside that range never fills, is logged once and is tried again
+  every 15 minutes. Config: see `agent.example.json`.
 - `src/cli.ts`: client tool. `create` makes a Kernel v3.1 account with the router
   installed (`--perf-fee-bps` is the agent's share of net realized gains, its terms);
   `status`, `withdraw`, `uninstall` and `install` work on it. `uninstall` closes the
@@ -69,4 +78,5 @@ npm run typecheck
 npm run cli -- status <account>          # FILLMARK_ROUTER=0x...
 npm run agent -- --config /etc/fillmark/agent.json --once
 FILLMARK_UPSTREAM_RPC=... ./e2e/run.sh   # anvil fork e2e, needs the market in session
+FILLMARK_UPSTREAM_RPC=... FILLMARK_E2E_SCRIPT=e2e/sell.ts ./e2e/run.sh   # take-profit sales, crypto only, any hour
 ```

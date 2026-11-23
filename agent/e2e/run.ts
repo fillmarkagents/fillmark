@@ -82,6 +82,7 @@ execFileSync(
   },
 );
 const run = JSON.parse(readFileSync(join(work, "broadcast/DeployV2.s.sol/4663/run-latest.json"), "utf8"));
+writeFileSync(join(work, "deployed"), ""); // run.sh starts its block heartbeat after the deploy
 const created = (name: string) => getAddress(run.transactions.find((t: any) => t.contractName === name && t.transactionType === "CREATE").contractAddress);
 const router = created("FillmarkRouterV2");
 const burnerAddr = created("FillmarkBurner");
@@ -212,20 +213,20 @@ const assetsOf = (lines: { msg: string; [k: string]: unknown }[], a: Address) =>
 assert.deepEqual(assetsOf(l1, account), ["NVDA"], JSON.stringify(l1));
 assert.deepEqual(assetsOf(l1, accountB), ["NVDA", "TSLA"], JSON.stringify(l1));
 assert.equal(filled(l1).length, 3, JSON.stringify(l1));
-assert.ok(l1.some((l) => l.msg === "daily fill cap reached, no more buys today"), JSON.stringify(l1));
+assert.ok(l1.some((l) => l.msg === "daily fill cap reached, no more trades today"), JSON.stringify(l1));
 for (const f of filled(l1)) console.log(`   ${f.asset} fee ${f.fee}: ${f.usdg} USDG micro, cost ${f.costUsdg} USDG micro`);
 
 step("a new process with the same cap: today's fills are counted from chain, nothing is sent");
 const l1b = runAgent(config);
 assert.equal(filled(l1b).length, 0, JSON.stringify(l1b));
-assert.ok(l1b.some((l) => l.msg === "daily fill cap reached, no more buys today"), JSON.stringify(l1b));
+assert.ok(l1b.some((l) => l.msg === "daily fill cap reached, no more trades today"), JSON.stringify(l1b));
 
-step("agent run 2 with a cap of 300: A buys the rest, B is at its daily limit, C is not funded");
+step("agent run 2 with a cap of 300: A buys the rest, B is at its daily limit, C is not funded (served for sales, too poor to buy)");
 writeConfig(300);
 const l2 = runAgent(config);
 assert.deepEqual(assetsOf(l2, account), ["WETH", "cbBTC"], JSON.stringify(l2));
 assert.equal(filled(l2).length, 2, JSON.stringify(l2));
-assert.equal(lastServed(l2), 2, JSON.stringify(l2));
+assert.equal(lastServed(l2), 3, JSON.stringify(l2));
 assert.ok(l2.some((l) => l.msg === "daily limit reached" && l.account === accountB), JSON.stringify(l2));
 assert.equal((await statsOf(ASSETS.TSLA)).fills, 0); // bought on v1
 for (const t of ["NVDA", "WETH", "cbBTC"]) assert.equal((await statsOf(ASSETS[t])).fills, 1, t);
@@ -345,7 +346,7 @@ assert.equal(bad.code, 1);
 assert.match(bad.err, /user operation failed/);
 assert.equal(await usdgOf(account), parseUnits("799.955", 6));
 
-step("cli settle: nothing is due (the agent only buys)");
+step("cli settle: nothing is due (the agent has only bought)");
 const se = cli(env, "settle", accountB);
 assert.equal(se.code, 0, se.err);
 assert.equal(JSON.parse(se.out).feeUsdg, "0");

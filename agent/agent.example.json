@@ -12,5 +12,6 @@
   "maxDevBps": 50,
   "minOutBufferBps": 30,
   "deadlineSec": 300,
-  "allowExtended": false
+  "allowExtended": false,
+  "takeProfitBps": 500
 }
