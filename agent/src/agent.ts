@@ -10,6 +10,8 @@
 //   and the per-trade limit;
 // - otherwise it buys the client's per-trade limit in USDG once, while the daily limit, the
 //   USDG balance (per-trade limit plus the router's fill fee) and the router allow it.
+// After a day with a sale of an asset it buys none of it for the router's hold in whole days
+// (7): a buy within the hold would take the sale's waiting gain off the units' cost.
 // Stocks trade in the regular session only (unless allowExtended), crypto at any hour.
 // Every fee tier is quoted with Uniswap's QuoterV2, and the best one the router accepts in
 // simulation is sent. Nonces come from the account, asset and day (and the sale's number),
@@ -169,10 +171,9 @@ function sqrt(n: bigint): bigint {
   return x;
 }
 
-/// One nonce per account, asset and UTC day, shared by buys and sales, so each pair trades
-/// at most once a day. The v1 agent used the same nonce on the v1 router, so up to
-/// previousRouterUntilDay a buy there also counts as that day's trade and the day a client
-/// moves to v2 never trades twice.
+/// One buy nonce per account, asset and UTC day, so an asset is bought at most once a day.
+/// The v1 agent used the same nonce on the v1 router, so up to previousRouterUntilDay a buy
+/// there also counts as that day's buy and the day a client moves to v2 never buys twice.
 export function buyNonce(account: Address, token: Address, day: bigint): bigint {
   const encoded = encodeAbiParameters(
     [{ type: "string" }, { type: "address" }, { type: "address" }, { type: "uint256" }],
@@ -217,6 +218,7 @@ export class Agent {
   private readonly pub;
   private readonly wallet;
   private feeds: Address = zeroAddress;
+  private pauseDays = 0n; // days without a buy of an asset after a sale of it: the router's hold, rounded up
   private chainId = 0;
   private readonly candidates: Address[] = []; // accounts installed for this agent, in install order
   private readonly installedAt = new Map<Address, bigint>(); // latest Installed block seen
@@ -257,6 +259,8 @@ export class Agent {
     });
     if (wallet !== this.key.address) throw new Error(`agent ${this.cfg.agentId} wallet is ${wallet}, key is ${this.key.address}`);
     this.feeds = await this.pub.readContract({ address: this.cfg.router, abi: routerAbi, functionName: "feeds" });
+    const hold = BigInt(await this.pub.readContract({ address: this.cfg.router, abi: routerAbi, functionName: "hold" }));
+    this.pauseDays = (hold + DAY - 1n) / DAY;
     log("info", "agent ready", { agentId: this.cfg.agentId, wallet, router: this.cfg.router, maxFillsPerDay: this.cfg.maxFillsPerDay });
   }
 
@@ -496,7 +500,11 @@ export class Agent {
     if (todo.length === 0) return;
 
     const previous = this.cfg.previousRouter !== zeroAddress && day <= this.cfg.previousRouterUntilDay;
-    const per = previous ? 3 : 2;
+    // A buy within the router's hold after a sale would take that sale's waiting gain off its cost,
+    // so the agent could buy one day and sell the next at a flat price: no buy of an asset for
+    // pauseDays after a day with a sale of it.
+    const back = Number(this.pauseDays);
+    const per = (previous ? 3 : 2) + back;
     const used = await this.pub.multicall({
       allowFailure: false,
       batchSize: BATCH,
@@ -507,13 +515,18 @@ export class Agent {
           { address: this.cfg.router, abi: nonceAbi, functionName: "nonceUsed", args: [t.c.account, nonce] } as const,
         ];
         if (previous) calls.push({ address: this.cfg.previousRouter, abi: nonceAbi, functionName: "nonceUsed", args: [t.c.account, nonce] } as const);
+        for (let k = 1; k <= back; k++)
+          calls.push({ address: this.cfg.router, abi: nonceAbi, functionName: "nonceUsed", args: [t.c.account, saleNonce(t.c.account, t.token, day - BigInt(k), 0n)] } as const);
         return calls;
       }),
     });
     const soldToday = new Set<string>();
+    const soldRecently = new Set<string>(); // a sale in the last pauseDays days: no buy
     const pending = todo.filter((t, i) => {
-      const [sold, ...buys] = used.slice(per * i, per * i + per);
+      const row = used.slice(per * i, per * i + per);
+      const [sold, ...buys] = row.slice(0, per - back);
       if (sold) soldToday.add(t.key);
+      if (row.slice(per - back).some(Boolean)) soldRecently.add(t.key);
       const bought = buys.some(Boolean);
       if (bought) this.done.add(t.key);
       return !bought;
@@ -558,6 +571,12 @@ export class Agent {
       const sell = takeProfit(lot.qty, lot.cost, price.answer, price.decimals, this.cfg.takeProfitBps) && units > 0n;
       if (!sell && soldToday.has(t.key)) {
         this.done.add(t.key); // a day with a sale has no buy of that asset
+        continue;
+      }
+      if (!sell && soldRecently.has(t.key)) {
+        // not done for the day: a take-profit sale may still come, checked every RETRY_SEC
+        this.retryAt.set(t.key, now + RETRY_SEC);
+        this.once("day", `pause:${t.key}`, "info", "sold in the last days: no buy until the router's hold ends", { account: c.account, asset: TICKER[t.token], pauseDays: this.pauseDays });
         continue;
       }
       if (!sell && c.debt > 0n) continue;
@@ -612,6 +631,13 @@ export class Agent {
           }
         }
         if (r === "small") {
+          if (soldRecently.has(t.key)) {
+            this.done.add(t.key); // no sale fits, and a sale in the last days rules out a buy
+            this.once("day", `small:${t.key}`, "info", "take-profit reached but no sale fits, and sold in the last days: no buy", {
+              account: c.account, asset: TICKER[t.token], units,
+            });
+            continue;
+          }
           if (sell) {
             this.once("day", `small:${t.key}`, "info", "take-profit reached but no sale fits between 10 USDG and the per-trade limit", {
               account: c.account, asset: TICKER[t.token], units,

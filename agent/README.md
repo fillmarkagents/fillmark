@@ -15,10 +15,14 @@ TypeScript (viem) tools for FillmarkRouterV2 on Robinhood Chain (4663).
     the per-trade limit even if the pool moves by `maxDevBps` or the feed by 0.5% before
     it lands, and its `minOut` is at least the router's 10 USDG minimum and, after the
     fill fee, the cost of the units sold, so a sale never sells below cost. A day with a
-    sale has no buy of that asset. When not even one sale fits (a per-trade limit under
-    about 10.2 USDG, or a lot worth less than 10 USDG), the agent buys instead;
-  - otherwise it buys the client's per-trade limit once, when the account holds that USDG
-    plus the router's fill fee (3 bps, sent to the burner) and owes this agent no fees.
+    sale has no buy of that asset, and neither do the next 7 days (the router's `hold`
+    in whole days): a buy then would take the sale's waiting gain off its cost, so at a
+    flat price above the mark the agent could buy one day and sell the next. When not
+    even one sale fits (a per-trade limit under about 10.2 USDG, or a lot worth less than
+    10 USDG), the agent buys instead, unless that pause applies;
+  - otherwise it buys the client's per-trade limit once, outside that pause, when the
+    account holds that USDG plus the router's fill fee (3 bps, sent to the burner) and
+    owes this agent no fees.
   Both count toward the client's daily limit. At most `maxFillsPerDay` (default 300) fills
   are sent per day across all clients, counted from the router's `Filled` events so the cap
   holds across restarts, and pairs go round robin (every account's first asset, then every

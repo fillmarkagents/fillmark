@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createTestClient, erc20Abi, getAddress, http, keccak256, parseUnits, toHex, type Address } from "viem";
+import { createTestClient, encodeAbiParameters, erc20Abi, getAddress, http, keccak256, parseUnits, toHex, type Address } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { robinhood } from "viem/chains";
 import { DAY, buyNonce, saleNonce } from "../src/agent.js";
@@ -192,5 +192,42 @@ assert.equal(fh.length, 1, JSON.stringify(lh));
 assert.equal(fh[0].account, H);
 assert.equal(fh[0].side, "buy");
 assert.ok((await lotOf(H)).qty > hBefore.qty);
+
+step("after a sale no buy of that asset until the router's hold ends: sales 3 and 7 days ago pause the buy, 8 days ago does not");
+// The router's nonceUsed (storage slot 5) is set as a sale of those days would have left it: a fork
+// cannot move a week ahead, as its price feeds would go stale.
+const markSold = async (a: Address, d: bigint) => {
+  const inner = keccak256(encodeAbiParameters([{ type: "address" }, { type: "uint256" }], [a, 5n]));
+  const slot = keccak256(encodeAbiParameters([{ type: "uint256" }, { type: "bytes32" }], [saleNonce(a, WETH, d, 0n), inner]));
+  await test.setStorageAt({ address: router, index: slot, value: toHex(1n, { size: 32 }) });
+  assert.equal(await pub.readContract({ address: router, abi: routerAbi, functionName: "nonceUsed", args: [a, saleNonce(a, WETH, d, 0n)] }), true);
+};
+const P3 = await account("P3", "12", "16");
+const P7 = await account("P7", "12", "17");
+const P8 = await account("P8", "12", "18");
+await markSold(P3, day - 3n);
+await markSold(P7, day - 7n);
+await markSold(P8, day - 8n);
+const lp = runAgent(config);
+const fp = lp.filter((x) => x.msg === "filled");
+assert.deepEqual(fp.map((x) => [x.account, x.side]), [[P8, "buy"]], JSON.stringify(lp));
+for (const a of [P3, P7]) {
+  assert.ok(lp.some((x) => x.msg.startsWith("sold in the last days") && x.account === a), JSON.stringify(lp));
+  assert.equal(await pub.readContract({ address: router, abi: routerAbi, functionName: "nonceUsed", args: [a, buyNonce(a, WETH, day)] }), false);
+}
+
+step("in the pause a take-profit sale still goes out (S), and the fallback buy does not (T, 10 USDG per trade)");
+const S = await account("S", "12", "19");
+const T = await account("T", "10", "20");
+await seed(S, "12");
+for (let n = 0; n < 3; n++) await seed(T, "10", n);
+await markSold(S, day - 3n);
+await markSold(T, day - 3n);
+writeConfig(-500);
+const ls = runAgent(config);
+const fs = ls.filter((x) => x.msg === "filled");
+assert.deepEqual(fs.map((x) => [x.account, x.side]), [[S, "sell"]], JSON.stringify(ls));
+assert.ok(ls.some((x) => x.msg.startsWith("take-profit reached but no sale fits, and sold in the last days") && x.account === T), JSON.stringify(ls));
+assert.equal(await pub.readContract({ address: router, abi: routerAbi, functionName: "nonceUsed", args: [T, buyNonce(T, WETH, day)] }), false);
 
 console.log("E2E SELL OK");
