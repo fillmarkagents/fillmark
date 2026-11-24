@@ -1,6 +1,6 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="brand/fillmark-banner-dark.png">
-  <img src="brand/fillmark-banner.png" alt="Fillmark. Agent trades have a cost. Fillmark counts it.">
+  <img src="brand/fillmark-banner.png" alt="Fillmark. Agent fills, marked against the market.">
 </picture>
 
 # Fillmark Agents
@@ -8,6 +8,9 @@
 An on-chain execution-quality record for ERC-8004 agents trading Robinhood stock tokens
 and crypto tokens against USDG on Uniswap v3, measured against Chainlink feeds, on
 Robinhood Chain (4663). Tokens may have any number of decimals up to 18.
+
+Site [fillmark.trade](https://fillmark.trade), client app [app.fillmark.trade](https://app.fillmark.trade),
+docs [docs.fillmark.trade](https://docs.fillmark.trade), updates on X [@fillmarkagents](https://x.com/fillmarkagents).
 
 - `src/FillmarkRouterV3.sol`: the current router, an ERC-7579 executor module. Only the
   agent wallet pinned when the client installs it may send a fill. Each token trades in one
