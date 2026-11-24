@@ -1,0 +1,19 @@
+{
+  "chainId": 4663,
+  "commit": "8cffec4328ade30c6f8109cf749140f10bdf3b30",
+  "router": "0x6F01e2bE7d1D31E88dF177bEC23392D1905FC8Aa",
+  "burner": "0x418106F0356E638C3823221FDBd2fBb3e8D7B024",
+  "owner": "0x6C3a19517e5c1cff510BC163DCA4a46C7a969261",
+  "timelock": "0x54b6b215e216938Cb673b5d256593c0a1dDacAC3",
+  "guardian": "0x534eeE806911FF49529e49A6cb94A5B3A6e9cBc3",
+  "feeds": "0xa54584AA004DD9E60522437A96F700d6d283EAA0",
+  "fillFeeBps": 3,
+  "holdSeconds": 604800,
+  "twapWindow": 120,
+  "pools": 28,
+  "deployer": "0x0c45BA239961efeedc8FDaD460CC4Bec6A12b4F1",
+  "txs": [
+    "0x456b76ccf13f5f8ce60a75edba8bfad61858354fbec1f10275b56017a84b25fe"
+  ],
+  "block": 121544597
+}
