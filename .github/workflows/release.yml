@@ -1,0 +1,69 @@
+name: Release
+
+permissions: {}
+
+on:
+  push:
+    tags:
+      - "sdk-v*"
+      - "mcp-v*"
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    # Protected environment: the first-publish token lives here, and only for that one release.
+    environment: npm-release
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing and provenance
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      # Trusted publishing needs npm 11.5.1 or later, staged publishing 11.15.0.
+      - name: Install npm
+        run: npm install -g npm@11.21.3 && npm --version
+
+      - name: Package from the tag
+        id: pkg
+        run: |
+          case "$GITHUB_REF_NAME" in
+            sdk-v*) dir=sdk ;;
+            mcp-v*) dir=mcp ;;
+            *) echo "unknown tag $GITHUB_REF_NAME" >&2; exit 1 ;;
+          esac
+          want="${GITHUB_REF_NAME#*-v}"
+          have=$(node -p "require('./$dir/package.json').version")
+          if [ "$have" != "$want" ]; then echo "tag $want, package.json $have" >&2; exit 1; fi
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
+      - name: Check
+        working-directory: ${{ steps.pkg.outputs.dir }}
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
+          npm run test:pack
+
+      # The first version of a package goes out with a one-day token (npm allows trusted
+      # publishing only for packages that exist); later versions are staged through trusted
+      # publishing and wait for a maintainer's approval with 2FA.
+      - name: Publish
+        working-directory: ${{ steps.pkg.outputs.dir }}
+        env:
+          FIRST_PUBLISH_TOKEN: ${{ secrets.NPM_FIRST_PUBLISH_TOKEN }}
+        run: |
+          if [ -n "$FIRST_PUBLISH_TOKEN" ]; then
+            printf '//registry.npmjs.org/:_authToken=%s\n' "$FIRST_PUBLISH_TOKEN" > "$RUNNER_TEMP/.npmrc"
+            NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/.npmrc" npm publish --provenance --access public
+            rm -f "$RUNNER_TEMP/.npmrc"
+          else
+            npm stage publish
+          fi

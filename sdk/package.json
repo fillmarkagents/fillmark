@@ -1,0 +1,61 @@
+{
+  "name": "@fillmark/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for ERC-8004 agents trading through the Fillmark router on Robinhood Chain.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22.14"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fillmarkagents/fillmark.git",
+    "directory": "sdk"
+  },
+  "homepage": "https://docs.fillmark.trade/sdk",
+  "bugs": "https://github.com/fillmarkagents/fillmark/issues",
+  "keywords": [
+    "fillmark",
+    "erc-8004",
+    "agents",
+    "robinhood-chain",
+    "stock-tokens",
+    "viem"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "gen": "tsx scripts/gen.ts",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test:chain": "tsx test/unit.ts",
+    "test:fork": "./test/run.sh",
+    "test:pack": "./scripts/packtest.sh",
+    "prepack": "npm run build"
+  },
+  "peerDependencies": {
+    "viem": "^2.57.20"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "viem": "2.57.20"
+  }
+}

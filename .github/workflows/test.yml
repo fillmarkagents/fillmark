@@ -57,3 +57,7 @@ jobs:
       - name: Typecheck record
         working-directory: record
         run: npm ci && npm run typecheck
+
+      - name: Check SDK
+        working-directory: sdk
+        run: npm ci && npm run typecheck && npm run build && npm run test:pack
