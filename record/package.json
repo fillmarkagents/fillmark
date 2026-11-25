@@ -1,0 +1,20 @@
+{
+  "name": "@fillmark/record",
+  "version": "0.1.0",
+  "description": "Reads and computes the Fillmark execution record of ERC-8004 agents on Robinhood Chain.",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx test/run.ts"
+  },
+  "dependencies": {
+    "viem": "2.57.20"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  }
+}

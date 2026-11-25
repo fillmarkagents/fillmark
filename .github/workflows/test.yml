@@ -53,3 +53,7 @@ jobs:
       - name: Typecheck agent
         working-directory: agent
         run: npm ci && npm run typecheck
+
+      - name: Typecheck record
+        working-directory: record
+        run: npm ci && npm run typecheck

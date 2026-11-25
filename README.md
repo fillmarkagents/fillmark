@@ -59,6 +59,9 @@ docs [docs.fillmark.trade](https://docs.fillmark.trade), updates on X [@fillmark
   when measured. Later tokens are added through the timelock.
 - `agent/`: reference DCA agent and client CLI (TypeScript, viem). See `agent/README.md`.
   The agent can change while the deployed contracts cannot.
+- `record/`: the code that reads the Fillmark record from chain and computes it, behind
+  [api.fillmark.trade](https://docs.fillmark.trade/api) and the figures on fillmark.trade.
+  See `record/README.md`.
 - `brand/`: logo, mark, avatar and banner files. See `brand/README.md`.
 
 ## Deployment
