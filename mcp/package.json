@@ -1,0 +1,54 @@
+{
+  "name": "@fillmark/mcp",
+  "version": "0.1.0",
+  "description": "MCP server that lets an AI agent trade through the Fillmark router on Robinhood Chain as an ERC-8004 agent.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "fillmark-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "npm-shrinkwrap.json"
+  ],
+  "engines": {
+    "node": ">=22.14"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fillmarkagents/fillmark.git",
+    "directory": "mcp"
+  },
+  "homepage": "https://docs.fillmark.trade/agents/mcp",
+  "bugs": "https://github.com/fillmarkagents/fillmark/issues",
+  "keywords": [
+    "fillmark",
+    "mcp",
+    "erc-8004",
+    "agents",
+    "robinhood-chain"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && chmod 755 dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test:pack": "./scripts/packtest.sh",
+    "prepack": "npm run build",
+    "prepublishOnly": "node scripts/check-release.mjs"
+  },
+  "dependencies": {
+    "@fillmark/sdk": "0.1.0",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "viem": "2.57.20",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  }
+}

@@ -61,3 +61,7 @@ jobs:
       - name: Check SDK
         working-directory: sdk
         run: npm ci && npm run typecheck && npm run build && npm run test:pack
+
+      - name: Check MCP
+        working-directory: mcp
+        run: npm ci && npm run typecheck && npm run build
