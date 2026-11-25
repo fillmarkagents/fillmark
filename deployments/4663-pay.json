@@ -1,0 +1,12 @@
+{
+  "chainId": 4663,
+  "commit": "04f16a7d61f915ab687a68b72264aba1394625d6",
+  "pay": "0x0f967E8CD8D3C9393DA64023d443b9Af691ED4D8",
+  "router": "0x6F01e2bE7d1D31E88dF177bEC23392D1905FC8Aa",
+  "burner": "0x418106F0356E638C3823221FDBd2fBb3e8D7B024",
+  "deployer": "0x0c45BA239961efeedc8FDaD460CC4Bec6A12b4F1",
+  "txs": [
+    "0xb0cbd4790b2ea24aff7b78b14ce0f3272714da06acf2fe995e66aec9488c0dc9"
+  ],
+  "block": 122942037
+}
