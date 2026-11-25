@@ -46,13 +46,17 @@ jobs:
 
       - name: Check
         working-directory: ${{ steps.pkg.outputs.dir }}
+        env:
+          DIR: ${{ steps.pkg.outputs.dir }}
         run: |
+          # The SDK's tests compare against the reference agent, so its typecheck needs agent/'s packages.
+          if [ "$DIR" = sdk ]; then npm ci --prefix ../agent; fi
           npm ci
           npm run typecheck
           npm run build
           npm run test:pack
 
-      # The first version of a package goes out with a one-day token (npm allows trusted
+      # The first version of a package goes out with a short-lived token (npm allows trusted
       # publishing only for packages that exist); later versions are staged through trusted
       # publishing and wait for a maintainer's approval with 2FA.
       - name: Publish

@@ -27,7 +27,7 @@
     "url": "git+https://github.com/fillmarkagents/fillmark.git",
     "directory": "sdk"
   },
-  "homepage": "https://docs.fillmark.trade/sdk",
+  "homepage": "https://docs.fillmark.trade/agents/sdk",
   "bugs": "https://github.com/fillmarkagents/fillmark/issues",
   "keywords": [
     "fillmark",
