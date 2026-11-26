@@ -295,10 +295,19 @@ async function sendUserOp(sender: PrivateKeyAccount, account: Address, owner: Ad
   return { tx: hash };
 }
 
+// Routers v1 and v2 bound fill prices more weakly than v3 (the agent picks the pool fee tier and
+// signs its own reference price); no account uses them, and new permissions go to v3 only.
+const RETIRED = new Set(["0xe542a7c8779962b8f819c4352d1436e08bc2d388", "0x15a172caa75ab7de22e9bb3cd981ea8c76cbe366"]);
+function installRouter(): Address {
+  const router = addressArg(process.env.FILLMARK_ROUTER, "FILLMARK_ROUTER");
+  if (RETIRED.has(router.toLowerCase())) throw new Error(`${router} is a retired Fillmark router: install router v3 (0x6F01e2bE7d1D31E88dF177bEC23392D1905FC8Aa)`);
+  return router;
+}
+
 async function create(v: Record<string, string | undefined>, regularOnly: boolean) {
   const sender = senderKey();
   const owner = v.owner ? addressArg(v.owner, "--owner") : sender.address;
-  const router = addressArg(process.env.FILLMARK_ROUTER, "FILLMARK_ROUTER");
+  const router = installRouter();
   const { pub, wallet } = clients(sender);
   if (owner === zeroAddress || (await pub.getCode({ address: owner }))) throw new Error("--owner must be a wallet address (no contract code)");
   const opts = installOpts(v, await checkedNow(pub), regularOnly);
@@ -329,7 +338,7 @@ async function create(v: Record<string, string | undefined>, regularOnly: boolea
 
 async function install(account: Address, v: Record<string, string | undefined>, regularOnly: boolean, sig?: Hex) {
   const sender = senderKey();
-  const router = addressArg(process.env.FILLMARK_ROUTER, "FILLMARK_ROUTER");
+  const router = installRouter();
   const { pub } = clients();
   const opts = installOpts(v, await checkedNow(pub), regularOnly);
   const r = await sendUserOp(sender, account, await accountOwner(account), installData(router, opts), sig, BOOK_GAS);

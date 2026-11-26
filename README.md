@@ -20,17 +20,16 @@ docs [docs.fillmark.trade](https://docs.fillmark.trade), updates on X [@fillmark
   above Chainlink NAV for a buy (below it for a sale), and the pool tick at most the smaller
   of C and the pool's TWAP cap past its TWAP in the same direction. The client's own account
   writes the fill's cost and notional to the ERC-8004
-  Reputation Registry in the same transaction; a write the registry refuses is counted and
-  logged instead of blocking the fill. Each fill pays a fill fee in USDG to the burner (3
+  Reputation Registry in the same transaction; a write that fails is counted and logged
+  instead of blocking the fill. Each fill pays a fill fee in USDG to the burner (3
   bps, at most 10, set through the timelock). Buys count against the client's limit over the
   current hour and the 24 before it, fill fee included; the agent sells only units it bought, and may keep
   selling them for 7 days after the permission expires. A client may keep the agent to
   regular US market hours for stocks. A performance fee of 0 to 30% of realized gains above
   the agent's previous peak is held in the router while a sale's gain waits to count, then
   paid or returned by the router's rules.
-- `src/FillmarkRouterV2.sol`: the second router, still live for accounts that have not moved
-  to the current one: signed fill intents, the fill fee and a performance fee ledger, with
-  the pool chosen by the agent.
+- `src/FillmarkRouterV2.sol`: the second router, retired (see Deployment): signed fill
+  intents, the fill fee and a performance fee ledger, with the pool chosen by the agent.
 - `src/FillmarkBurner.sol`: receives the fill fees, and nothing can withdraw them. Once the
   timelock sets the $FILLMARK token (only once, and only for a graduated Pons V2 launch
   paired with USDG whose position Pons locked), anyone may call `burn()` at most once an
@@ -48,8 +47,8 @@ docs [docs.fillmark.trade](https://docs.fillmark.trade), updates on X [@fillmark
   position's USDG side per Ethereum block, and nothing in the same second as a burn. A
   client may close at any time; what is still owed is billed if it opens again with the
   same agent. Until the burner has its token, settle pays nothing.
-- `src/FillmarkRouter.sol`: the first router, still live for accounts that have not moved.
-  It has v2's price, slippage and limit checks, without fees or a ledger.
+- `src/FillmarkRouter.sol`: the first router, retired (see Deployment). It has v2's price,
+  slippage and limit checks, without fees or a ledger.
 - `src/FillmarkFeeds.sol`: token to Chainlink feed map, the US market calendar for
   stock tokens and halts for crypto tokens (which otherwise trade at any hour while
   their feed is fresh), add-only, administered through a timelock. A guardian may add
@@ -92,10 +91,10 @@ agent 26144 is tag `agent-v0.6.1`.
 | TimelockController, 2-day delay | `0x54b6b215e216938Cb673b5d256593c0a1dDacAC3` |
 | FillmarkFeeds | `0xa54584AA004DD9E60522437A96F700d6d283EAA0` |
 | FillmarkRouterV3 (current) | `0x6F01e2bE7d1D31E88dF177bEC23392D1905FC8Aa` |
-| FillmarkRouterV2 (second) | `0x15A172CAA75AB7de22E9Bb3Cd981eA8c76cBe366` |
+| FillmarkRouterV2 (second, retired) | `0x15A172CAA75AB7de22E9Bb3Cd981eA8c76cBe366` |
 | FillmarkBurner | `0x418106F0356E638C3823221FDBd2fBb3e8D7B024` |
 | FillmarkPay | `0x0f967E8CD8D3C9393DA64023d443b9Af691ED4D8` |
-| FillmarkRouter (first) | `0xe542a7c8779962b8f819c4352d1436e08bc2d388` |
+| FillmarkRouter (first, retired) | `0xe542a7c8779962b8f819c4352d1436e08bc2d388` |
 | Guardian (closures, halts and switching a v3 pool off only) | `0x534eeE806911FF49529e49A6cb94A5B3A6e9cBc3` |
 | Reference agent wallet, ERC-8004 agent 26144 (identity owned by the Safe) | `0xDCe0AAc0A8E6629A0ae3c739ced29B8B31c960B8` |
 
@@ -110,6 +109,12 @@ the deploy transactions, and the matching folders under `broadcast/` hold the Fo
 broadcasts. A recursive clone builds bytecode identical to the deployed contracts.
 `FOUNDRY_PROFILE=chain forge build --sizes` checks them against Robinhood Chain's
 98,304-byte contract size limit.
+
+Routers v1 and v2 are retired. They cannot be switched off, but their price bounds are
+weaker than v3's: the agent picks the pool fee tier and signs its own reference price, so
+only the client's slippage limit binds the fill. On 26 Nov 2026 no account had either
+installed. The client app installs v3 only, the CLI refuses to install v1 or v2, and the SDK works
+with v3 only.
 
 ## Tests
 

@@ -57,6 +57,7 @@ export type Fill = {
   cost: bigint; // USDG 6 decimals, positive = worse for the client than the reference price
   shortfallBps: number; // fill price vs reference price, positive = worse
   nav: bigint; // reference price, USDG per whole token, 8 decimals
+  navUpdatedAt: number; // when Chainlink last updated that price (the round's updatedAt)
   price: bigint; // fill price, same units
   maxSlipBps: number | null; // the client's slippage limit in force at the fill
   session: number; // 0 closed, 1 extended, 2 regular
@@ -237,7 +238,7 @@ export function buildRecord(logs: Decoded[], feedbackLogs: Feedback[], r: Reads)
   const fills: Fill[] = filled
     .map((l) => {
       const { fill, prices } = l.args as {
-        fill: { stock: Address; buy: boolean; usdgAmount: bigint; stockAmount: bigint; fillFee?: bigint; stockDecimals: number; session: number };
+        fill: { stock: Address; buy: boolean; usdgAmount: bigint; stockAmount: bigint; fillFee?: bigint; stockDecimals: number; updatedAt: bigint; session: number };
         prices: { cost: bigint; nav: bigint; fill: bigint; shortfall: bigint };
       };
       return {
@@ -260,6 +261,7 @@ export function buildRecord(logs: Decoded[], feedbackLogs: Feedback[], r: Reads)
         cost: prices.cost,
         shortfallBps: Number(prices.shortfall) / 100,
         nav: prices.nav,
+        navUpdatedAt: Number(fill.updatedAt),
         price: prices.fill,
         maxSlipBps: slipAt(l.router, l.args.account as Address, l.blockNumber),
         session: Number(fill.session),

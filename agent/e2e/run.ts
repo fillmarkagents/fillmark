@@ -135,6 +135,11 @@ const installFlags = ["--agent-id", String(agentId), "--max-per-trade", "50", "-
 const burnerStart = await pub.readContract({ address: USDG, abi: erc20Abi, functionName: "balanceOf", args: [burnerAddr] });
 const deal = (a: Address, usdg: string) => test.request({ method: "anvil_dealERC20" as any, params: [a, USDG, "0x" + parseUnits(usdg, 6).toString(16)] as any });
 
+step("cli create refuses a retired router (the live v2)");
+const retired = cli({ ...env, FILLMARK_ROUTER: liveRouter }, "create", ...installFlags);
+assert.equal(retired.code, 1, retired.err);
+assert.match(retired.err, /retired Fillmark router/);
+
 step("cli create");
 const c1 = cli(env, "create", ...installFlags);
 assert.equal(c1.code, 0, c1.err);

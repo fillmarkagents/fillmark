@@ -3,7 +3,7 @@
 // and size as the router's Filled event, and the totals must add up.
 // RPC=<Robinhood Chain RPC> npm test
 import { createPublicClient, http } from "viem";
-import { PAGE, agentFillsPage, agentRecord, agentsList, costPer100, loadRecord, totals } from "../src/index";
+import { PAGE, agentFillsPage, agentRecord, agentsList, costPer100, fillJson, loadRecord, totals } from "../src/index";
 
 const rpc = process.env.RPC ?? "https://rpc.mainnet.chain.robinhood.com";
 const client = createPublicClient({ transport: http(rpc, { batch: { batchSize: 10 }, retryCount: 3, timeout: 30_000 }) });
@@ -31,6 +31,8 @@ for (const f of r.fills) {
   check(`${name}: entry cost ${cost?.value} = Filled cost ${f.cost}`, cost?.value === f.cost && cost?.valueDecimals === 6);
   check(`${name}: entry size ${size?.value} = Filled USDG ${f.usdg}`, size?.value === f.usdg && size?.valueDecimals === 6);
   check(`${name}: has a block time`, f.time !== null);
+  const age = fillJson(f).marketPriceAgeSec;
+  check(`${name}: market price ${age} s old, within the feeds' 25 h limit`, age !== null && age >= 0 && age <= 25 * 3600);
 }
 
 const now = Math.floor(Date.now() / 1000);
@@ -50,6 +52,9 @@ for (const a of r.agents) {
   let seen = 0;
   for (let p = 1; p <= last.pages; p++) seen += agentFillsPage(r, a.agentId, p)!.fills.length;
   check(`agent ${a.agentId}: ${last.pages} page(s) of ${PAGE} hold every fill once`, seen === fills.length);
+  let failed = 0;
+  for (let p = 1; p <= last.pages; p++) for (const f of agentFillsPage(r, a.agentId, p)!.fills) failed += f.feedbackFailed.length;
+  check(`agent ${a.agentId}: ${rec.feedbackFailed} entries not written, each on one of its fills`, rec.feedbackFailed === failed && agentsList(r).agents.find((x) => x.agentId === a.agentId.toString())!.feedbackFailed === failed);
 }
 
 console.log(failures ? `FAILED: ${failures}` : "ALL OK");

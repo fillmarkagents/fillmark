@@ -4,7 +4,7 @@ import type { Address, Hex } from "viem";
 import type { Account, Agent, ChainRecord, Feedback, FeedbackFail, Fill, Install } from "./record";
 
 // Maps built once per record, so no answer scans the whole record for each fill or account.
-type Lookup = { byAgent: Map<bigint, Fill[]>; byTx: Map<string, Fill[]>; accounts: Map<string, Account>; installs: Map<string, Install>; feedback: Map<string, Feedback[]>; fails: Map<string, FeedbackFail[]> };
+type Lookup = { byAgent: Map<bigint, Fill[]>; byTx: Map<string, Fill[]>; accounts: Map<string, Account>; installs: Map<string, Install>; feedback: Map<string, Feedback[]>; fails: Map<string, FeedbackFail[]>; failsByAgent: Map<bigint, number> };
 const lookups = new WeakMap<ChainRecord, Lookup>();
 const push = <K, V>(m: Map<K, V[]>, k: K, v: V) => {
   const list = m.get(k);
@@ -14,7 +14,7 @@ const push = <K, V>(m: Map<K, V[]>, k: K, v: V) => {
 function lookup(r: ChainRecord): Lookup {
   let l = lookups.get(r);
   if (l) return l;
-  l = { byAgent: new Map(), byTx: new Map(), accounts: new Map(), installs: new Map(), feedback: new Map(), fails: new Map() };
+  l = { byAgent: new Map(), byTx: new Map(), accounts: new Map(), installs: new Map(), feedback: new Map(), fails: new Map(), failsByAgent: new Map() };
   for (const f of r.fills) {
     push(l.byAgent, f.agentId, f);
     push(l.byTx, f.tx.toLowerCase(), f);
@@ -22,7 +22,10 @@ function lookup(r: ChainRecord): Lookup {
   for (const a of r.accounts) if (!l.accounts.has(a.account.toLowerCase())) l.accounts.set(a.account.toLowerCase(), a);
   for (const i of r.installs) if (!l.installs.has(i.account.toLowerCase())) l.installs.set(i.account.toLowerCase(), i);
   for (const x of r.feedback) push(l.feedback, `${x.tx}:${x.hash}:${x.client}`.toLowerCase(), x);
-  for (const x of r.feedbackFails) push(l.fails, `${x.tx}:${x.hash}:${x.account}`.toLowerCase(), x);
+  for (const x of r.feedbackFails) {
+    push(l.fails, `${x.tx}:${x.hash}:${x.account}`.toLowerCase(), x);
+    l.failsByAgent.set(x.agentId, (l.failsByAgent.get(x.agentId) ?? 0) + 1);
+  }
   lookups.set(r, l);
   return l;
 }
@@ -93,6 +96,7 @@ export type FillJson = {
   amount: string;
   fillPrice: string;
   marketPrice: string;
+  marketPriceAgeSec: number | null;
   bps: number;
   costUsdg: string;
   fillFeeUsdg: string;
@@ -132,6 +136,8 @@ export function fillJson(f: Fill): FillJson {
     amount: fmt(f.amount, f.decimals),
     fillPrice: price(f.price),
     marketPrice: price(f.nav),
+    // Seconds from Chainlink's last update of that price to the fill's block.
+    marketPriceAgeSec: f.time === null ? null : f.time - f.navUpdatedAt,
     bps: f.shortfallBps,
     costUsdg: usdg(f.cost),
     fillFeeUsdg: usdg(f.fillFee),
@@ -158,6 +164,9 @@ function totalsJson(fills: Fill[]) {
   };
 }
 
+// ERC-8004 entries that could not be written for an agent's fills (router v3 keeps the fill).
+const failedEntries = (r: ChainRecord, agentId: bigint) => lookup(r).failsByAgent.get(agentId) ?? 0;
+
 // How many fills an agent has.
 export const agentFillCount = (r: ChainRecord, agentId: bigint) => lookup(r).byAgent.get(agentId)?.length ?? 0;
 
@@ -170,7 +179,7 @@ export function agentsList(r: ChainRecord) {
     ...asOf(r),
     agents: r.agents.map((a) => {
       const fills = agentFills(r, a.agentId);
-      return { agentId: a.agentId.toString(), name: a.name, fills: fills.length, firstFill: point(fills[fills.length - 1]), lastFill: point(fills[0]) };
+      return { agentId: a.agentId.toString(), name: a.name, fills: fills.length, feedbackFailed: failedEntries(r, a.agentId), firstFill: point(fills[fills.length - 1]), lastFill: point(fills[0]) };
     }),
   };
 }
@@ -203,6 +212,7 @@ export function agentRecord(r: ChainRecord, agentId: bigint, now: number) {
     ...asOf(r),
     agent: { agentId: agent.agentId.toString(), name: agent.name, summary: agent.summary, owner: agent.owner, wallet: agent.wallet },
     totals: totalsJson(fills),
+    feedbackFailed: failedEntries(r, agentId),
     assets: [...groups.values()]
       .map((g) => ({ token: g[0].stock, ticker: g[0].asset?.ticker ?? null, ...totalsJson(g) }))
       .sort((a, b) => b.fills - a.fills),
