@@ -70,7 +70,9 @@ docs [docs.fillmark.trade](https://docs.fillmark.trade), updates on X [@fillmark
   Chainlink USD feed, a genuine contract (Robinhood's stock token beacon, or the issuer's
   own listing) and a Uniswap v3 USDG pool that filled $100 both ways within 10% of NAV
   when measured. Later tokens are added through the timelock.
-- `agent/`: reference DCA agent and client CLI (TypeScript, viem). See `agent/README.md`.
+- `agent/`: reference agent and client CLI (TypeScript, viem). Each client account follows the
+  strategy its owner signed, dca with take-profit or rebalance to target weights; an account
+  with no setting gets dca. See `agent/README.md`.
   The agent can change while the deployed contracts cannot.
 - `record/`: the code that reads the Fillmark record from chain and computes it, behind
   [api.fillmark.trade](https://docs.fillmark.trade/api) and the figures on fillmark.trade.
@@ -82,7 +84,7 @@ docs [docs.fillmark.trade](https://docs.fillmark.trade), updates on X [@fillmark
 Robinhood Chain (4663). Tag `v1.0.0` is the deployed source of the feeds and the first
 router, tag `v2.0.0` of the second router and the burner, tag `v3.0.0` of the current
 router, and tag `pay-v1.0.0` of Fillmark Pay. The reference agent that runs for ERC-8004
-agent 26144 is the one in `v3.0.0` (`agent-v0.4.0`).
+agent 26144 is tag `agent-v0.6.0`.
 
 | Contract | Address |
 | --- | --- |
@@ -95,7 +97,7 @@ agent 26144 is the one in `v3.0.0` (`agent-v0.4.0`).
 | FillmarkPay | `0x0f967E8CD8D3C9393DA64023d443b9Af691ED4D8` |
 | FillmarkRouter (first) | `0xe542a7c8779962b8f819c4352d1436e08bc2d388` |
 | Guardian (closures, halts and switching a v3 pool off only) | `0x534eeE806911FF49529e49A6cb94A5B3A6e9cBc3` |
-| Reference DCA agent wallet, ERC-8004 agent 26144 (identity owned by the Safe) | `0xDCe0AAc0A8E6629A0ae3c739ced29B8B31c960B8` |
+| Reference agent wallet, ERC-8004 agent 26144 (identity owned by the Safe) | `0xDCe0AAc0A8E6629A0ae3c739ced29B8B31c960B8` |
 
 The Safe is the timelock's proposer, executor and canceller, and the timelock is its own
 admin. No router has an owner or can be upgraded, and neither has Pay. Through the
