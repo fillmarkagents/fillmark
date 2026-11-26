@@ -137,9 +137,13 @@ async function account(name: string, salt: string, usdg = "1000"): Promise<Addre
 const A = await account("A (opens with pay-open)", "31", "0");
 const B = await account("B (opens tracking WETH only)", "32", "0");
 
+// No client has a setting: every account keeps the dca the agent ran before strategies.
+const settingsFile = join(work, "settings.json");
+writeFileSync(settingsFile, JSON.stringify({ settings: [] }));
+const settingsStore = join(work, "settings-store.json");
 const config = join(work, "agent.json");
 const writeConfig = (extra: Record<string, unknown> = {}) =>
-  writeFileSync(config, JSON.stringify({ router, agentId: String(agentId), keyFile: agent.path, deployBlock: String(deployBlock), allowExtended: true, payRateBps: 2, payRequired: true, paySamples: 1, payMinUsdg: "0", ...extra }));
+  writeFileSync(config, JSON.stringify({ router, agentId: String(agentId), keyFile: agent.path, deployBlock: String(deployBlock), allowExtended: true, payRateBps: 2, payRequired: true, paySamples: 1, payMinUsdg: "0", settingsFile, settingsStore, ...extra }));
 
 step("config checks: payRequired must be a boolean, and paySamples ticks must fit in an hour");
 writeConfig({ payRequired: "true" });

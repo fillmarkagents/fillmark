@@ -181,12 +181,16 @@ assert.equal(cC.code, 0, cC.err);
 const accountC = getAddress(JSON.parse(cC.out).account);
 await deal(accountC, "5");
 
+// No client has a setting: every account keeps the dca the agent ran before strategies.
+const settingsFile = join(work, "settings.json");
+writeFileSync(settingsFile, JSON.stringify({ settings: [] }));
+const settingsStore = join(work, "settings-store.json");
 const config = join(work, "agent.json");
 const day = (await pub.getBlock()).timestamp / DAY;
 const writeConfig = (maxFillsPerDay: number) =>
   writeFileSync(
     config,
-    JSON.stringify({ router, agentId: String(agentId), keyFile: agent.path, deployBlock: String(deployBlock), maxFillsPerDay, previousRouter: liveRouter, previousRouterUntilDay: String(day), allowExtended: true }),
+    JSON.stringify({ router, agentId: String(agentId), keyFile: agent.path, deployBlock: String(deployBlock), maxFillsPerDay, previousRouter: liveRouter, previousRouterUntilDay: String(day), allowExtended: true, settingsFile, settingsStore }),
   );
 writeConfig(3);
 

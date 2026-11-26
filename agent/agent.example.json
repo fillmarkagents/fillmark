@@ -19,5 +19,8 @@
   "payRequired": true,
   "paySlipBps": 300,
   "paySamples": 30,
-  "payMinUsdg": "0.01"
+  "payMinUsdg": "0.01",
+  "settingsUrl": "https://api.fillmark.trade/v1/settings",
+  "settingsStore": "/var/lib/fillmark-agent/settings.json",
+  "maxRebalanceTradesPerDay": 20
 }

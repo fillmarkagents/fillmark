@@ -1,6 +1,8 @@
-// Fillmark reference agent: dollar-cost averaging with take-profit for every client account
-// that installed this agent on router v3. Clients and their limits are read from chain.
-// Each UTC day, for each asset the client allowed:
+// Fillmark reference agent for every client account that installed this agent on router v3.
+// Clients and their limits are read from chain. Each account follows the strategy its owner
+// chose in a signed setting (settings.ts): "dca" or "rebalance" (rebalance.ts). An account with
+// no setting in effect gets dca exactly as agent 0.5.0 ran it. Under dca, each UTC day, for each
+// asset the client allowed:
 // - when the Chainlink price is at least takeProfitBps above the average cost of the units
 //   this agent bought for the account (the router's lot), the agent sells, again and again
 //   that day, each sale about the client's per-trade limit, until the lot is sold. Sales do
@@ -21,13 +23,16 @@
 // Nonces come from the account, asset and day (and the sale's number),
 // and an intent expires at the end of its day, so a restart, a retry or a client changing
 // its limits can never buy an asset twice in one day or repeat a sale.
+// Rebalance: the account's allowed assets and its USDG are valued at the router's prices and
+// brought back to the client's target weights when one drifts past the threshold or on the
+// schedule: sales of the agent's own units first, then buys within the daily limit.
 // Fillmark Pay: with payRateBps set, the agent keeps those terms on the Pay contract. Before a
 // fill it tracks the token in the client's open agreement, and once a UTC day it settles what
 // is due, only at a price near the median it saw over the last hour. With payRequired, once
 // the burner has its token, it buys only for accounts whose open agreement can pay what is
 // due and what the buy adds; sales of what it bought go on either way.
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import {
@@ -47,6 +52,7 @@ import {
 import type { PrivateKeyAccount } from "viem/accounts";
 import { burnerAbi, feedsAbi, payAbi, ponsHookAbi, routerAbi } from "./abi.generated.js";
 import {
+  ECDSA_VALIDATOR,
   IDENTITY,
   KERNEL_IMPL,
   SESSIONS,
@@ -66,6 +72,8 @@ import {
 } from "./chain.js";
 import type { FillIntent } from "./intent.js";
 import { WAITS, median, minReceivedPerUsdg, tokenPerUsdg, type PayState, type Terms } from "./pay.js";
+import { BPS, planRebalance, scheduleOpen } from "./rebalance.js";
+import { ROOT_ECDSA, SettingsBook, StoreError, effectiveDay, kernelRootAbi, validatorAbi, withFingerprint, type Mode, type Setting } from "./settings.js";
 
 export const DAY = 86_400n;
 const MIN_NOTIONAL = 10_000_000n; // FillmarkRouter.MIN_NOTIONAL, 10 USDG
@@ -89,6 +97,7 @@ const CONFIG_KEYS = new Set([
   "router", "agentId", "keyFile", "deployBlock", "maxFillsPerDay", "minEth", "previousRouter",
   "previousRouterUntilDay", "minPerfFeeBps", "tickSec", "maxDevBps", "minOutBufferBps", "deadlineSec", "allowExtended",
   "takeProfitBps", "payRateBps", "payMinZeroAtBps", "payRequired", "paySlipBps", "paySamples", "payMinUsdg",
+  "settingsUrl", "settingsFile", "settingsStore", "maxRebalanceTradesPerDay",
 ]);
 
 export type Config = {
@@ -113,6 +122,10 @@ export type Config = {
   paySlipBps: number; // a settle takes at least the hour's median price less this
   paySamples: number; // pool prices seen in the last hour before a settle
   payMinUsdg: bigint; // no settle for less: below it the gas costs more than the pay
+  settingsUrl: string; // where clients' signed settings are read
+  settingsFile: string | null; // read settings from this file instead (fork tests, self-hosting)
+  settingsStore: string; // every setting seen, kept on disk
+  maxRebalanceTradesPerDay: number; // per account
 };
 
 export function loadConfig(path: string): Config {
@@ -165,6 +178,10 @@ export function loadConfig(path: string): Config {
     paySlipBps: int("paySlipBps", 300, 10, 2000),
     paySamples,
     payMinUsdg: parseUnits(payMin, 6),
+    settingsUrl: String(raw.settingsUrl ?? "https://api.fillmark.trade/v1/settings"),
+    settingsFile: raw.settingsFile === undefined ? null : String(raw.settingsFile),
+    settingsStore: String(raw.settingsStore ?? "/var/lib/fillmark-agent/settings.json"),
+    maxRebalanceTradesPerDay: int("maxRebalanceTradesPerDay", 20, 1, 200),
   };
 }
 
@@ -228,7 +245,18 @@ export function saleNonce(account: Address, token: Address, day: bigint, n: bigi
   return BigInt(keccak256(encoded));
 }
 
+/// The base of the n-th rebalance trade of an asset for an account on a UTC day, one counter
+/// per side. A rebalance nonce always carries the setting's fingerprint on top.
+export function rebalanceNonce(account: Address, token: Address, day: bigint, sell: boolean, n: bigint): bigint {
+  const encoded = encodeAbiParameters(
+    [{ type: "string" }, { type: "address" }, { type: "address" }, { type: "uint256" }, { type: "bool" }, { type: "uint256" }],
+    ["fillmark-rb-v1", account, token, day, sell, n],
+  );
+  return BigInt(keccak256(encoded));
+}
+
 const MAX_SALES_PER_TICK = 25; // per pair; the daily limit stops them well before
+const MAX_REBALANCE_PER_TICK = 10; // trades per account per tick
 
 type Client = {
   account: Address;
@@ -243,6 +271,7 @@ type Client = {
   buys: boolean; // false after expiry: the router allows sales only, for SELL_GRACE
   regularOnly: boolean; // the client allowed fills in the regular session only
   pay: PayState | null; // the Fillmark Pay agreement with this agent, when the agent has terms
+  mode: Mode; // the strategy this account follows today
 };
 
 /// The largest buy whose USDG and fill fee fit both the per-trade limit and what is left of
@@ -295,6 +324,11 @@ export class Agent {
   private readonly payChecked = new Map<Address, bigint>(); // account not served -> UTC day its agreement was last read
   private payLive = false; // the burner has its token: Fillmark Pay pays out
   private payKnown = false; // payLive was read this tick; with payRequired, no buys when not
+  private book!: SettingsBook; // clients' signed settings
+  private settingsReadAt = 0n;
+  private readonly salesToday = new Map<Address, bigint>(); // USDG of this agent's sales today, per account
+  private readonly rbNext = new Map<string, bigint>(); // day:account:token:side -> next rebalance nonce index
+  private readonly modeKey = new Map<Address, string>(); // the mode last logged per account
 
   constructor(
     private readonly cfg: Config,
@@ -321,6 +355,20 @@ export class Agent {
     this.pauseDays = (hold + DAY - 1n) / DAY;
     this.sellGrace = BigInt(await this.pub.readContract({ address: this.cfg.router, abi: routerAbi, functionName: "SELL_GRACE" }));
     await this.payTerms();
+    const write = (p: string, text: string) => {
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(`${p}.tmp`, text);
+      renameSync(`${p}.tmp`, p);
+    };
+    this.book = new SettingsBook(
+      this.cfg.router,
+      this.cfg.agentId,
+      this.cfg.settingsStore,
+      { url: this.cfg.settingsUrl, file: this.cfg.settingsFile ?? undefined },
+      { exists: existsSync, read: (p) => readFileSync(p, "utf8"), write },
+    );
+    this.book.load();
+    await this.refreshSettings(0n);
     log("info", "agent ready", { agentId: this.cfg.agentId, wallet, router: this.cfg.router, maxFillsPerDay: this.cfg.maxFillsPerDay, pay: this.terms });
   }
 
@@ -402,6 +450,7 @@ export class Agent {
       this.fillScanned = this.fillFirst - 1n;
       this.fillDay = day;
       this.fillsToday.clear();
+      this.salesToday.clear();
       this.revertedToday = 0;
     }
     let from = this.fillScanned - RESCAN + 1n;
@@ -417,11 +466,74 @@ export class Agent {
         toBlock: to,
         strict: true,
       });
-      for (const l of logs) this.fillsToday.add(`${l.transactionHash}:${l.logIndex}`);
+      for (const l of logs) this.noteFill(`${l.transactionHash}:${l.logIndex}`, getAddress(l.args.account), l.args.fill.buy, l.args.fill.usdgAmount);
       if (to > this.fillScanned) this.fillScanned = to;
       from = to + 1n;
     }
     return this.fillsToday.size + this.revertedToday;
+  }
+
+  /// Counts a fill of today once, and the USDG of a sale against its account.
+  private noteFill(key: string, account: Address, buy: boolean, usdg: bigint) {
+    if (this.fillsToday.has(key)) return;
+    this.fillsToday.add(key);
+    if (!buy) this.salesToday.set(account, (this.salesToday.get(account) ?? 0n) + usdg);
+  }
+
+  /// Reads clients' signed settings, at most every two minutes.
+  private async refreshSettings(now: bigint) {
+    if (now !== 0n && now < this.settingsReadAt + 120n) return;
+    this.settingsReadAt = now;
+    try {
+      const today = (now === 0n ? await checkedNow(this.pub) : now) / DAY;
+      const added = await this.book.refresh(async (url) => {
+        const r = await fetch(url, { signal: AbortSignal.timeout(10_000), headers: { accept: "application/json" } });
+        if (!r.ok) throw new Error(`the settings source answered ${r.status}`);
+        return r.text();
+      }, today);
+      if (added > 0) log("info", "new client settings", { added });
+    } catch (err) {
+      if (err instanceof StoreError) {
+        this.once("hour", "settingsstore", "error", "could not write the settings store: new client settings wait until it can", { store: this.cfg.settingsStore, error: err.message });
+        return;
+      }
+      const msg = this.book.known ? "could not read client settings, using those on disk" : "could not read client settings and none are on disk: no trades";
+      this.once("hour", "settings", this.book.known ? "warn" : "error", msg, { error: revertName(err) });
+    }
+  }
+
+  /// The strategy each account follows today. Unknown settings stop every account: an account
+  /// that chose a strategy must never be traded with another one.
+  private async setModes(served: Client[], day: bigint) {
+    if (!this.book.known) {
+      for (const c of served) c.mode = { kind: "blocked", reason: "client settings unknown" };
+    } else {
+      const withSettings = served.filter((c) => this.book.hasSettings(c.account));
+      if (withSettings.length > 0) {
+        const reads = await this.pub.multicall({
+          batchSize: BATCH,
+          contracts: withSettings.flatMap((c) => [
+            { address: ECDSA_VALIDATOR, abi: validatorAbi, functionName: "ecdsaValidatorStorage", args: [c.account] } as const,
+            { address: c.account, abi: kernelRootAbi, functionName: "rootValidator" } as const,
+          ]),
+        });
+        for (const [i, c] of withSettings.entries()) {
+          const o = reads[2 * i]!;
+          const r = reads[2 * i + 1]!;
+          const owner = o.status === "success" && o.result !== zeroAddress ? getAddress(o.result as Address) : null;
+          const root = r.status === "success" && String(r.result).toLowerCase() === ROOT_ECDSA;
+          c.mode = this.book.mode(c.account, day, owner, root, await this.allowedTokens(c));
+        }
+      }
+    }
+    for (const c of served) {
+      const m = c.mode;
+      const k = m.kind === "dca" || m.kind === "rebalance" ? `${m.kind}:${m.digest}` : m.kind === "blocked" ? `blocked:${m.reason}` : "legacy";
+      if (this.modeKey.get(c.account) === k) continue;
+      this.modeKey.set(c.account, k);
+      if (m.kind === "blocked") log("warn", "account blocked: no trades", { account: c.account, reason: m.reason });
+      else log("info", "strategy", { account: c.account, strategy: m.kind === "legacy" ? "dca" : m.kind, setting: m.kind === "legacy" ? null : m.digest });
+    }
   }
 
   /// Accounts open to this agent now, for a buy or a sale. Accounts no longer installed for
@@ -476,7 +588,7 @@ export class Agent {
       const buys = expiry >= now;
       if (!buys) this.once("day", `expired:${account}`, "info", "permission expired, sales only until the router's grace ends", { account, expiry });
       unserved.pop();
-      served.push({ account, installId, maxSlipBps, maxPerTrade, fillFeeBps, dailyLimit, spent, balance, debt, buys, regularOnly, pay: null });
+      served.push({ account, installId, maxSlipBps, maxPerTrade, fillFeeBps, dailyLimit, spent, balance, debt, buys, regularOnly, pay: null, mode: { kind: "legacy" } });
     });
     if (this.terms.minZeroAtBps > 0 && served.length > 0) {
       const pay = await this.pub.multicall({
@@ -553,7 +665,7 @@ export class Agent {
     this.scope = { day: `d${day}`, hour: `h${hour}` };
     for (const k of this.noted) if (!k.startsWith(`${this.scope.day}|`) && !k.startsWith(`${this.scope.hour}|`)) this.noted.delete(k);
     for (const set of [this.done, this.banned]) for (const k of set) if (!k.startsWith(`${day}:`)) set.delete(k);
-    for (const map of [this.retryAt, this.saleNext]) for (const k of map.keys()) if (!k.startsWith(`${day}:`)) map.delete(k);
+    for (const map of [this.retryAt, this.saleNext, this.rbNext]) for (const k of map.keys()) if (!k.startsWith(`${day}:`)) map.delete(k);
     if (!(await this.ethAbove())) return;
 
     try {
@@ -566,6 +678,25 @@ export class Agent {
     if (this.terms.minZeroAtBps > 0) {
       await this.payTick(served, now).catch((err) => this.once("hour", `pay:${revertName(err)}`, "error", "Fillmark Pay step failed", { error: revertName(err) }));
     }
+    await this.refreshSettings(now);
+    await this.setModes(served, day);
+    await this.dcaTick(served.filter((c) => c.mode.kind === "legacy" || c.mode.kind === "dca"), now, day);
+    await this.rebalanceTick(served.filter((c) => c.mode.kind === "rebalance"), now, day);
+  }
+
+  /// Dollar-cost averaging with take-profit, for accounts with no setting in effect (0.5.0
+  /// nonces) and accounts whose setting chose dca (nonces with the setting's fingerprint).
+  private async dcaTick(served: Client[], now: bigint, day: bigint) {
+    const fpOf = (c: Client) => (c.mode.kind === "dca" ? c.mode.fp : null);
+    const buyN = (c: Client, token: Address) => {
+      const fp = fpOf(c);
+      return fp === null ? buyNonce(c.account, token, day) : withFingerprint(fp, buyNonce(c.account, token, day));
+    };
+    const saleN = (c: Client, token: Address, d: bigint, n: bigint) => {
+      const fp = fpOf(c);
+      return fp === null ? saleNonce(c.account, token, d, n) : withFingerprint(fp, saleNonce(c.account, token, d, n));
+    };
+    const tpOf = (c: Client) => (c.mode.kind === "dca" ? c.mode.setting.takeProfitBps : this.cfg.takeProfitBps);
     // Round robin: every account's first asset, then every account's second, and so on,
     // so no single account can take the whole daily cap.
     const pairs: { c: Client; token: Address; key: string; rank: number; order: number }[] = [];
@@ -640,31 +771,35 @@ export class Agent {
     // A buy within the router's hold after a sale would take that sale's waiting gain off its cost,
     // so the agent could buy one day and sell the next at a flat price: no buy of an asset for
     // pauseDays after a day with a sale of it.
+    // Accounts with a dca setting read the pause from the router's held gains instead (below):
+    // their earlier days' nonces carry other fingerprints.
     const back = Number(this.pauseDays);
-    const per = (previous ? 3 : 2) + back;
-    const used = await this.pub.multicall({
-      allowFailure: false,
-      batchSize: BATCH,
-      contracts: todo.flatMap((t) => {
-        const nonce = buyNonce(t.c.account, t.token, day);
-        const calls = [
-          { address: this.cfg.router, abi: nonceAbi, functionName: "nonceUsed", args: [t.c.account, saleNonce(t.c.account, t.token, day, 0n)] } as const,
-          { address: this.cfg.router, abi: nonceAbi, functionName: "nonceUsed", args: [t.c.account, nonce] } as const,
-        ];
-        if (previous) calls.push({ address: this.cfg.previousRouter, abi: nonceAbi, functionName: "nonceUsed", args: [t.c.account, nonce] } as const);
-        for (let k = 1; k <= back; k++)
-          calls.push({ address: this.cfg.router, abi: nonceAbi, functionName: "nonceUsed", args: [t.c.account, saleNonce(t.c.account, t.token, day - BigInt(k), 0n)] } as const);
-        return calls;
-      }),
-    });
+    const layout: { start: number; buys: number; back: number }[] = [];
+    const calls: { address: Address; abi: typeof nonceAbi; functionName: "nonceUsed"; args: readonly [Address, bigint] }[] = [];
+    const used1 = (router: Address, account: Address, nonce: bigint) => calls.push({ address: router, abi: nonceAbi, functionName: "nonceUsed", args: [account, nonce] } as const);
+    for (const t of todo) {
+      const legacy = t.c.mode.kind === "legacy";
+      const start = calls.length;
+      used1(this.cfg.router, t.c.account, saleN(t.c, t.token, day, 0n));
+      used1(this.cfg.router, t.c.account, buyN(t.c, t.token));
+      let buys = 1;
+      if (legacy && previous) {
+        used1(this.cfg.previousRouter, t.c.account, buyNonce(t.c.account, t.token, day));
+        buys++;
+      }
+      const b = legacy ? back : 0;
+      for (let k = 1; k <= b; k++) used1(this.cfg.router, t.c.account, saleNonce(t.c.account, t.token, day - BigInt(k), 0n));
+      layout.push({ start, buys, back: b });
+    }
+    const used = await this.pub.multicall({ allowFailure: false, batchSize: BATCH, contracts: calls });
     const soldToday = new Set<string>();
     const soldRecently = new Set<string>(); // a sale in the last pauseDays days: no buy
     const pending = todo.filter((t, i) => {
-      const row = used.slice(per * i, per * i + per);
-      const [sold, ...buys] = row.slice(0, per - back);
-      if (sold) soldToday.add(t.key);
-      if (row.slice(per - back).some(Boolean)) soldRecently.add(t.key);
-      const bought = buys.some(Boolean);
+      const { start, buys, back: b } = layout[i]!;
+      const row = used.slice(start, start + 1 + buys + b);
+      if (row[0]) soldToday.add(t.key);
+      if (row.slice(1 + buys).some(Boolean)) soldRecently.add(t.key);
+      const bought = row.slice(1, 1 + buys).some(Boolean);
       if (bought) this.done.add(t.key);
       return !bought;
     });
@@ -697,11 +832,14 @@ export class Agent {
         this.once("day", "cap", "warn", "daily fill cap reached, no more trades today", { maxFillsPerDay: this.cfg.maxFillsPerDay });
         return;
       }
-      let [lot] = held[2 * i] as readonly [Lot, ...unknown[]];
+      let [lot, waiting, later] = held[2 * i] as readonly [Lot, { until: bigint }, { until: bigint }, ...unknown[]];
       let balance = held[2 * i + 1] as bigint;
       const price = priceOf.get(t.token)!;
       let units = lot.qty < balance ? lot.qty : balance; // never more than the lot: the client's own units stay
-      const sell = takeProfit(lot.qty, lot.cost, price.answer, price.decimals, this.cfg.takeProfitBps) && units > 0n;
+      const tp = tpOf(c);
+      // With a dca setting, the pause holds while a sale's gain waits in the router.
+      if (c.mode.kind === "dca" && (waiting.until > now || later.until > now)) soldRecently.add(t.key);
+      const sell = takeProfit(lot.qty, lot.cost, price.answer, price.decimals, tp) && units > 0n;
       if (!sell && soldToday.has(t.key)) {
         this.done.add(t.key); // a day with a sale has no buy of that asset
         continue;
@@ -747,9 +885,9 @@ export class Agent {
           // until the lot is sold, the daily limit is reached or no sale fits.
           let n = this.saleNext.get(t.key) ?? 0n;
           while (sales < MAX_SALES_PER_TICK) {
-            while (await this.pub.readContract({ address: this.cfg.router, abi: nonceAbi, functionName: "nonceUsed", args: [c.account, saleNonce(c.account, t.token, day, n)] })) n++;
+            while (await this.pub.readContract({ address: this.cfg.router, abi: nonceAbi, functionName: "nonceUsed", args: [c.account, saleN(c, t.token, day, n)] })) n++;
             this.saleNext.set(t.key, n);
-            r = await this.sell(c, t.token, poolOf.get(t.token)!, units, lot, price, day, at, t.key, saleNonce(c.account, t.token, day, n));
+            r = await this.sell(c, t.token, poolOf.get(t.token)!, units, lot, price, day, at, t.key, saleN(c, t.token, day, n), { floor: true, wholeLot: false });
             if (r !== "filled") break;
             sales++;
             n++;
@@ -766,7 +904,7 @@ export class Agent {
             [lot] = pos as readonly [Lot, ...unknown[]];
             balance = bal as bigint;
             units = lot.qty < balance ? lot.qty : balance;
-            if (units === 0n || !takeProfit(lot.qty, lot.cost, price.answer, price.decimals, this.cfg.takeProfitBps)) break;
+            if (units === 0n || !takeProfit(lot.qty, lot.cost, price.answer, price.decimals, tp)) break;
           }
           if (sales > 0 || soldToday.has(t.key)) {
             // A sale day: no buy. "small" now means the rest of the lot is under 10 USDG.
@@ -801,7 +939,7 @@ export class Agent {
               continue;
             }
           }
-          r = await this.buy(c, t.token, poolOf.get(t.token)!, amount, day, at, t.key);
+          r = await this.buy(c, t.token, poolOf.get(t.token)!, amount, day, at, t.key, buyN(c, t.token));
           if (r === "filled") {
             c.balance -= amount + fee;
             c.spent += amount + fee;
@@ -822,6 +960,230 @@ export class Agent {
       }
       this.retryAt.set(t.key, now + RETRY_SEC); // no tier filled: try again later, not every tick
     }
+  }
+
+  /// Rebalance, for accounts whose setting chose it: one account at a time, one trade at a
+  /// time, each decided from a fresh read of the account.
+  private async rebalanceTick(list: Client[], now: bigint, day: bigint) {
+    if (list.length === 0) return;
+    let fills: number;
+    try {
+      fills = await this.countFills(day);
+    } catch (err) {
+      this.once("hour", "fills", "error", "could not count today's fills, no trades this tick", { error: revertName(err) });
+      return;
+    }
+    for (const c of list) {
+      if (fills >= this.cfg.maxFillsPerDay) {
+        this.once("day", "cap", "warn", "daily fill cap reached, no more trades today", { maxFillsPerDay: this.cfg.maxFillsPerDay });
+        return;
+      }
+      const key = `${day}:${c.account}:rebalance`;
+      if (this.banned.has(`${day}:${c.account}`) || (this.retryAt.get(key) ?? 0n) > now) continue;
+      try {
+        if (!(await this.isPlainKernel(c.account))) {
+          this.banned.add(`${day}:${c.account}`);
+          this.once("day", `kernel:${c.account}`, "warn", "account is not a plain Kernel account, skipped today", { account: c.account });
+          continue;
+        }
+        const wait = await this.rebalanceOne(c, now, day);
+        if (wait) this.retryAt.set(key, now + RETRY_SEC);
+      } catch (err) {
+        this.once("hour", `rbfail:${c.account}:${revertName(err)}`, "error", "rebalance failed", { account: c.account, error: revertName(err) });
+        this.retryAt.set(key, now + RETRY_SEC);
+      }
+      fills = this.fillsToday.size + this.revertedToday;
+    }
+  }
+
+  /// Trades one account toward its targets. Returns true when it should wait before the next try.
+  private async rebalanceOne(c: Client, now: bigint, day: bigint): Promise<boolean> {
+    const m = c.mode;
+    if (m.kind !== "rebalance") return true;
+    const s: Setting = m.setting;
+    const { router, agentId } = this.cfg;
+    if (!c.buys) {
+      this.once("day", `rbexpired:${c.account}`, "info", "rebalance: permission expired, no rebalance trades", { account: c.account });
+      return true;
+    }
+    const tokens = await this.allowedTokens(c);
+    const weight = new Map(s.targets.map((t) => [t.asset, t.weightBps]));
+    const tolBps = s.driftBps > 0 ? s.driftBps / 2 : 50;
+    const scheduled = s.everyDays > 0 && scheduleOpen(day, effectiveDay(s), s.everyDays);
+    const rbN = (token: Address, d: bigint, sell: boolean, n: bigint) => withFingerprint(m.fp, rebalanceNonce(c.account, token, d, sell, n));
+
+    // Under way: a rebalance trade today or yesterday under this setting.
+    const started = await this.pub.multicall({
+      allowFailure: false,
+      batchSize: BATCH,
+      contracts: tokens.flatMap((t) =>
+        [day, day - 1n].flatMap((d) => [false, true].map((sell) => ({ address: router, abi: nonceAbi, functionName: "nonceUsed", args: [c.account, rbN(t, d, sell, 0n)] }) as const)),
+      ),
+    });
+    let underway = started.some(Boolean);
+    // Today's rebalance trades so far, from the nonce counters.
+    let tradesToday = 0n;
+    for (const t of tokens) {
+      for (const sell of [false, true]) {
+        const k = `${day}:${c.account}:${t}:${sell ? "s" : "b"}`;
+        let n = this.rbNext.get(k) ?? 0n;
+        while (await this.pub.readContract({ address: router, abi: nonceAbi, functionName: "nonceUsed", args: [c.account, rbN(t, day, sell, n)] })) n++;
+        this.rbNext.set(k, n);
+        tradesToday += n;
+      }
+    }
+
+    const skip = new Set<Address>(); // assets whose sale cannot go this tick: planned as if not sellable
+    for (let step = 0; step < MAX_REBALANCE_PER_TICK; step++) {
+      if (tradesToday >= BigInt(this.cfg.maxRebalanceTradesPerDay)) {
+        this.once("day", `rbcap:${c.account}`, "info", "rebalance: the account's trades for today are used up", { account: c.account });
+        return true;
+      }
+      if (this.fillsToday.size + this.revertedToday >= this.cfg.maxFillsPerDay || this.banned.has(`${day}:${c.account}`)) return true;
+      const at = await checkedNow(this.pub);
+      if (at / DAY !== day) return false;
+      if (!(await this.ethAbove())) return true;
+
+      // The account now: balances, the agent's lots, prices the router accepts, sessions, pools.
+      // One batch of mixed reads; each result is checked and typed where it is used.
+      const contracts: unknown[] = [
+          { address: USDG, abi: erc20Abi, functionName: "balanceOf", args: [c.account] } as const,
+          { address: router, abi: routerAbi, functionName: "windowSpent", args: [c.account] } as const,
+          { address: router, abi: routerAbi, functionName: "bookOf", args: [c.account, agentId] } as const,
+          { address: PAY, abi: payAbi, functionName: "dueOf", args: [c.account, agentId] } as const,
+          ...tokens.flatMap((t) => [
+            { address: t, abi: erc20Abi, functionName: "balanceOf", args: [c.account] } as const,
+            { address: router, abi: routerAbi, functionName: "positionOf", args: [c.account, agentId, t] } as const,
+            { address: router, abi: routerAbi, functionName: "priceOf", args: [t] } as const,
+            { address: this.feeds, abi: feedsAbi, functionName: "sourceOf", args: [t, at] } as const,
+            { address: router, abi: routerAbi, functionName: "poolOf", args: [t] } as const,
+          ]),
+      ];
+      const reads = (await this.pub.multicall({ batchSize: BATCH, contracts: contracts as any[] })) as { status: "success" | "failure"; result?: unknown; error?: unknown }[];
+      const ok = <T>(i: number) => {
+        const r = reads[i]!;
+        if (r.status !== "success") throw new Error(`read ${i} failed: ${revertName(r.error)}`);
+        return r.result as T;
+      };
+      const usdg = ok<bigint>(0);
+      const spent = ok<bigint>(1);
+      const debt = ok<{ debt: bigint }>(2).debt;
+      const payDue = ok<{ due: bigint }>(3).due; // owed to this agent on an agreement, open or closed
+      type Row = { token: Address; balance: bigint; lot: Lot; price: Price | null; tradable: boolean; pool: Pool | null };
+      const rows: Row[] = tokens.map((token, j) => {
+        const b = 4 + 5 * j;
+        const balance = ok<bigint>(b);
+        const [lot] = ok<readonly [Lot, ...unknown[]]>(b + 1);
+        const pr = reads[b + 2]!;
+        const src = reads[b + 3]!;
+        const pl = ok<{ pool: Address; fee: number; active: boolean }>(b + 4);
+        const price = pr.status === "success" ? { answer: (pr.result as readonly [bigint, number])[0], decimals: (pr.result as readonly [bigint, number])[1] } : null;
+        const session = src.status === "success" ? SESSIONS[(src.result as { session: number }).session] : "Closed";
+        const tradable = session === "Regular" || (session === "Extended" && this.cfg.allowExtended && !c.regularOnly);
+        return { token, balance, lot, price, tradable, pool: pl.active ? { pool: pl.pool, fee: pl.fee } : null };
+      });
+      const book = rows.filter((r) => r.balance > 0n || (weight.get(r.token) ?? 0) > 0);
+      const unpriced = book.filter((r) => !r.price);
+      if (unpriced.length > 0) {
+        this.once("hour", `rbprice:${c.account}`, "info", "rebalance waits: an asset cannot be priced now", { account: c.account, assets: unpriced.map((r) => TICKER[r.token]) });
+        return true;
+      }
+      const cash = usdg > payDue + debt ? usdg - payDue - debt : 0n;
+      const holdings = book.map((r) => {
+        const own = r.lot.qty < r.balance ? r.lot.qty : r.balance; // only the agent's own units are sold
+        const units = skip.has(r.token) ? 0n : own;
+        const p = r.price!;
+        return { token: r.token, units, value: navValue(r.balance, p.answer, p.decimals), sellable: navValue(units, p.answer, p.decimals), weightBps: weight.get(r.token) ?? 0 };
+      });
+      const probe = planRebalance(holdings, cash, s.cashBps, MIN_NOTIONAL);
+      if (probe.total === 0n) return true;
+      const triggered = underway || scheduled || (s.driftBps > 0 && probe.driftBps >= s.driftBps);
+      if (!triggered) {
+        this.once("day", `rbquiet:${c.account}`, "info", "rebalance: within the threshold", { account: c.account, driftBps: probe.driftBps, thresholdBps: s.driftBps });
+        return true;
+      }
+      const tol = (probe.total * BigInt(Math.floor(tolBps))) / BPS;
+      const minTrade = tol > MIN_NOTIONAL ? tol : MIN_NOTIONAL;
+      const plan = planRebalance(holdings, cash, s.cashBps, minTrade);
+      // An asset whose target is 0: every unit the agent bought is sold, the last of them even
+      // under 10 USDG when that is the whole lot (the router allows a whole-lot sale below it).
+      const sales = plan.sells.map((x) => ({ ...x, all: false }));
+      for (const h of holdings) {
+        if (h.weightBps === 0 && h.units > 0n && !sales.some((x) => x.token === h.token)) sales.push({ token: h.token, usdg: h.sellable, all: true });
+      }
+      if (sales.length === 0 && plan.buys.length === 0) {
+        if (underway || scheduled) this.once("day", `rbdone:${c.account}`, "info", "rebalance: on target", { account: c.account, driftBps: probe.driftBps });
+        return true;
+      }
+      // Every asset the plan trades must trade now, so a rebalance is never left half done
+      // because one leg cannot go.
+      const legs = [...sales, ...plan.buys].map((x) => rows.find((r) => r.token === x.token)!);
+      const stuck = legs.filter((r) => !r.tradable || !r.pool);
+      if (stuck.length > 0) {
+        this.once("hour", `rbstuck:${c.account}`, "info", "rebalance waits: an asset it must trade cannot trade now", { account: c.account, assets: stuck.map((r) => TICKER[r.token]) });
+        return true;
+      }
+      underway = true;
+
+      if (sales.length > 0) {
+        const x = sales[0]!;
+        const r = rows.find((y) => y.token === x.token)!;
+        const price = r.price!;
+        const units = r.lot.qty < r.balance ? r.lot.qty : r.balance;
+        const sold = this.salesToday.get(c.account) ?? 0n;
+        const room = c.dailyLimit > sold ? c.dailyLimit - sold : 0n; // keeps a day's sales within the daily limit, as Fillmark Pay's allowance assumes
+        const scale = 10n ** BigInt(price.decimals + 2);
+        let want = x.all ? units : (x.usdg * scale) / price.answer;
+        const roomUnits = (room * scale) / price.answer;
+        if (want > roomUnits) want = roomUnits;
+        if (want > units) want = units;
+        // Under 10 USDG only as the whole lot; anything else waits for the next tick, and the rest
+        // of the plan goes on without it.
+        const wholeLot = x.all && want === r.lot.qty;
+        if (want === 0n || (!wholeLot && navValue(want, price.answer, price.decimals) < MIN_NOTIONAL)) {
+          if (room < MIN_NOTIONAL) this.once("day", `rbsales:${c.account}`, "info", "rebalance: today's sales reached the daily limit", { account: c.account });
+          else this.once("hour", `rbsmall:${c.account}:${x.token}`, "info", "rebalance: this sale is under 10 USDG, buys go on", { account: c.account, asset: TICKER[x.token] });
+          skip.add(x.token);
+          continue;
+        }
+        const k = `${day}:${c.account}:${x.token}:s`;
+        const n = this.rbNext.get(k) ?? 0n;
+        const res = await this.sell(c, x.token, r.pool!, want, r.lot, price, day, at, `${day}:${c.account}:${x.token}`, rbN(x.token, day, true, n), { floor: false, wholeLot, maxOut: room });
+        if (res !== "filled") {
+          skip.add(x.token);
+          continue;
+        }
+        this.rbNext.set(k, n + 1n);
+        tradesToday++;
+        continue;
+      }
+
+      const x = plan.buys[0]!;
+      const r = rows.find((y) => y.token === x.token)!;
+      if (debt > 0n) {
+        this.once("day", `debt:${c.account}`, "info", "account owes this agent fees, sales only", { account: c.account, debt });
+        return true;
+      }
+      let amount = buyAmount(c.maxPerTrade, c.dailyLimit, spent, c.fillFeeBps);
+      if (amount > x.usdg) amount = x.usdg;
+      if (amount < MIN_NOTIONAL) {
+        this.once("day", `limit:${c.account}`, "info", "rebalance: daily limit reached, buys go on later", { account: c.account });
+        return true;
+      }
+      if (amount + (amount * c.fillFeeBps) / 10_000n > cash) amount = (cash * 10_000n) / (10_000n + c.fillFeeBps);
+      if (amount < MIN_NOTIONAL) return true;
+      const fee = (amount * c.fillFeeBps) / 10_000n;
+      c.balance = usdg;
+      if (c.pay) c.pay.due = payDue;
+      if (!this.payable(c, amount, fee)) return true;
+      const k = `${day}:${c.account}:${x.token}:b`;
+      const n = this.rbNext.get(k) ?? 0n;
+      const res = await this.buy(c, x.token, r.pool!, amount, day, at, `${day}:${c.account}:${x.token}`, rbN(x.token, day, false, n));
+      if (res !== "filled") return true;
+      this.rbNext.set(k, n + 1n);
+      tradesToday++;
+    }
+    return false;
   }
 
   /// Adds a token to the client's open Fillmark Pay agreement, so fills of it are paid for.
@@ -974,7 +1336,7 @@ export class Agent {
   /// Quotes the router's official pool for `amountIn` USDG and sends the buy. The router
   /// bounds the pool price after the swap against NAV and the pool's TWAP; a buy it would
   /// refuse fails in simulation and is tried again later ("retry").
-  private async buy(c: Client, token: Address, { pool, fee }: Pool, amountIn: bigint, day: bigint, now: bigint, key: string): Promise<Result> {
+  private async buy(c: Client, token: Address, { pool, fee }: Pool, amountIn: bigint, day: bigint, now: bigint, key: string, nonce: bigint): Promise<Result> {
     const asset = TICKER[token];
     const [sqrtP] = await this.pub.readContract({ address: pool, abi: poolAbi, functionName: "slot0" });
     const limit = buyLimit(sqrtP, token, c.maxSlipBps);
@@ -999,7 +1361,7 @@ export class Agent {
       amountIn,
       minOut: (out * BigInt(10_000 - this.cfg.minOutBufferBps)) / 10_000n,
       sqrtPriceLimitX96: limit,
-      nonce: buyNonce(c.account, token, day),
+      nonce,
       deadline: this.deadline(now, day),
     });
     return r === "rejected" ? "retry" : r;
@@ -1012,13 +1374,18 @@ export class Agent {
   /// the cost of the units sold: a take-profit sale never sells below cost. "small": no amount
   /// in that range can be sold, so the agent buys instead. "retry": the pool pays too little
   /// now, or the router refuses the sale.
-  private async sell(c: Client, token: Address, { pool, fee }: Pool, units: bigint, lot: Lot, price: Price, day: bigint, now: bigint, key: string, nonce: bigint): Promise<Result> {
+  private async sell(
+    c: Client, token: Address, { pool, fee }: Pool, units: bigint, lot: Lot, price: Price, day: bigint, now: bigint, key: string, nonce: bigint,
+    opts: { floor: boolean; wholeLot: boolean; maxOut?: bigint },
+  ): Promise<Result> {
     const asset = TICKER[token];
-    const capOut = (c.maxPerTrade * BigInt(10_000 - this.cfg.maxDevBps - FEED_MARGIN_BPS)) / 10_000n;
+    const perTrade = (c.maxPerTrade * BigInt(10_000 - this.cfg.maxDevBps - FEED_MARGIN_BPS)) / 10_000n;
+    // A rebalance sale also stays within what is left of the day's sales.
+    const capOut = opts.maxOut !== undefined && opts.maxOut < perTrade ? opts.maxOut : perTrade;
     const capUnits = (capOut * 10n ** BigInt(price.decimals + 2)) / price.answer; // units worth capOut at NAV
     const want = units < capUnits ? units : capUnits;
     const floorFor = (qty: bigint) => {
-      if (this.cfg.takeProfitBps < 1) return 0n; // fork tests only: loadConfig refuses it otherwise
+      if (!opts.floor || this.cfg.takeProfitBps < 1) return 0n; // rebalance sales; and fork tests only: loadConfig refuses it otherwise
       const cost = (lot.cost * qty + lot.qty - 1n) / lot.qty; // the lot's cost of qty units, rounded up
       return (cost * 10_000n + 10_000n - c.fillFeeBps - 1n) / (10_000n - c.fillFeeBps); // gross whose net covers it
     };
@@ -1046,7 +1413,9 @@ export class Agent {
       return "retry";
     }
     const minOut = (out * BigInt(10_000 - this.cfg.minOutBufferBps)) / 10_000n;
-    if (qty === 0n || out > capOut || minOut < MIN_NOTIONAL || navValue(qty, price.answer, price.decimals) > capOut) return "small";
+    // A sale of the whole lot may be under the router's 10 USDG minimum (rebalance, target 0 only).
+    const whole = opts.wholeLot && qty === units && qty === want;
+    if (qty === 0n || out > capOut || (minOut < MIN_NOTIONAL && !whole) || navValue(qty, price.answer, price.decimals) > capOut) return "small";
     const floor = floorFor(qty);
     if (minOut < floor) {
       this.once("hour", `cost:${key}`, "info", "sale would not cover the lot's cost, not sold", { account: c.account, asset, minOut, floor });
@@ -1111,11 +1480,13 @@ export class Agent {
     }
     const logs = receipt.logs.filter((l) => getAddress(l.address) === router);
     const [filled] = parseEventLogs({ abi: routerAbi, eventName: "Filled", logs });
-    this.fillsToday.add(`${hash}:${filled.logIndex}`);
+    this.noteFill(`${hash}:${filled.logIndex}`, c.account, side === "buy", filled.args.fill.usdgAmount);
     const refused = parseEventLogs({ abi: routerAbi, eventName: "FeedbackFailed", logs }).length;
     if (refused > 0) log("warn", "the registry refused this fill's feedback", { account: c.account, asset, tx: hash, refused });
     log("info", "filled", {
       account: c.account,
+      strategy: c.mode.kind === "legacy" ? "dca" : c.mode.kind,
+      setting: c.mode.kind === "dca" || c.mode.kind === "rebalance" ? c.mode.digest : null,
       asset,
       side,
       pool: filled.args.pool,

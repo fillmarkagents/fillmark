@@ -1,5 +1,5 @@
 [Unit]
-Description=Fillmark reference DCA agent
+Description=Fillmark reference agent
 After=network-online.target
 Wants=network-online.target
 
@@ -12,6 +12,8 @@ RestartSec=30
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
+# The settings store (settingsStore) lives in /var/lib/fillmark-agent.
+StateDirectory=fillmark-agent
 ProtectHome=read-only
 ProtectKernelTunables=true
 ProtectKernelModules=true

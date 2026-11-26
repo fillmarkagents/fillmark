@@ -2,12 +2,13 @@
 
 TypeScript (viem) tools for FillmarkRouterV3 on Robinhood Chain (4663).
 
-- `src/agent.ts`: DCA agent with take-profit. It finds its clients on chain: every account
+- `src/agent.ts`: the agent. Each client account follows the strategy its owner chose, dca with
+  take-profit or rebalance (see Strategies below). It finds its clients on chain: every account
   whose router config names this agent (found through the router's `Installed` events
   from `deployBlock`), is not past its expiry plus the router's 7-day sale grace (after
   expiry it only sells), and installed it with a performance fee of at least
-  `minPerfFeeBps` (default 0). Each UTC day, for each asset the client allowed:
-  - when the Chainlink price is at least `takeProfitBps` (default 500, 5%; at least 1)
+  `minPerfFeeBps` (default 0). Under dca, each UTC day, for each asset the client allowed:
+  - when the Chainlink price is at least `takeProfitBps` (default 500, 5%; at least 1; a dca setting brings its own)
     above the average cost of the units this agent bought for the account (the router's
     lot, read with `positionOf`), it sells, again and again that day, until the lot is
     sold. Sales do not use the daily limit (router v3 counts buys only). Each sale is about the client's per-trade limit,
@@ -62,6 +63,38 @@ TypeScript (viem) tools for FillmarkRouterV3 on Robinhood Chain (4663).
   holds), the current one within `paySlipBps` (default 300, 3%) of their median, at least
   `payMinUsdg` (default 0.01) payable, and with a minimum of that median less the pool's
   swap fees, the 10% burn and `paySlipBps`. Config: see `agent.example.json`.
+  Strategies: the account's owner signs a setting (EIP-712, domain "Fillmark" version 1 on
+  chain 4663 with the router as verifying contract) and posts it. The agent reads settings
+  from `settingsUrl` (or `settingsFile`) at most every two minutes and keeps every one it has
+  seen in `settingsStore`. It uses a setting only when its signer is the account's ECDSA owner
+  and the ECDSA validator is the account's root validator. A setting takes effect at the first
+  00:00 UTC after its `validFrom`, and not before the day after the agent first saw it; the
+  highest `seq` in effect wins, and two settings with that seq stop the account. An account
+  with no setting gets dca as before, under the same nonces. The agent never moves an account
+  to another strategy than the one it chose: until it has read the settings once (or has them
+  on disk) it trades nothing, and an account whose setting cannot be used (a signer that is
+  not the owner) is not traded. A setting the agent first sees today starts tomorrow; until then
+  the account keeps its strategy, except when the store was started today (lost, or a new
+  machine) and the setting is dated before today: it may already be in effect, so the account
+  waits for it.
+  A setting's nonces carry its fingerprint (the top 128 bits of its EIP-712 digest), so every
+  fill shows the setting it ran under. Under a dca setting the pause after a sale lasts while
+  the router still holds that sale's gain.
+  Rebalance: the setting gives target weights in bps for the client's allowed assets and for
+  USDG (adding up to 10000), a drift threshold `driftBps` (100 to 5000, or 0 for none) and a
+  schedule `everyDays` (0, 7 or 30). The agent values the account at the router's prices:
+  each asset's balance, and the USDG less what Fillmark Pay and the router are owed. When a
+  weight is off its target by the threshold, or in a scheduled window (3 days a week, 7 days a
+  month, counted from the day after `validFrom`), it trades back to within half the threshold
+  (50 bps on a schedule alone), in trades of at least 10 USDG: sales of the units it bought
+  first (never the client's own units, and with no take-profit floor), largest first, then
+  buys within the per-trade and daily limits. A sale that cannot go now (under 10 USDG, or
+  refused) waits for the next tick and the buys go on without it. A day's sales also stay within
+  the daily limit, which Fillmark Pay's allowance assumes. A run goes on the next day while it
+  traded the day before; a day with no rebalance trade ends it. It starts only when every asset
+  it must trade can be priced and traded now, sends at most `maxRebalanceTradesPerDay`
+  (default 20) trades per account per day, and none after the permission expires. For an asset
+  whose target is 0 it sells every unit it bought, the last of them even under 10 USDG.
 - `src/cli.ts`: client tool. `create` makes a Kernel v3.1 account with the router
   installed (`--perf-fee-bps` is the agent's share of net realized gains, its terms;
   `--regular-only` keeps stock fills out of extended hours; `--daily-limit` counts buys
@@ -78,7 +111,10 @@ TypeScript (viem) tools for FillmarkRouterV3 on Robinhood Chain (4663).
   twice the daily buy limit for each day until the permission ends and 7 days after; then
   `open` tracking every allowed asset), `pay-close` ends it and sets the allowance to 0
   (`--keep-allowance` leaves it for another open agreement), and `pay-status` shows what is
-  earned, paid and due. User operations
+  earned, paid and due. `strategy` signs the account's setting for its agent (no
+  transaction, no gas) with the key in `FILLMARK_KEY_FILE` when that key is the owner, or
+  prints the typed data for a wallet owner to sign; `--post` sends it to
+  `FILLMARK_SETTINGS_URL`. User operations
   are hashed locally (chain 4663, EntryPoint v0.7) and sent to the EntryPoint by the key
   in `FILLMARK_KEY_FILE` with zero gas fees, so no bundler is needed and the account needs
   no ETH. By default that key is also the owner and signs. With `--owner`, `create` makes
@@ -113,4 +149,5 @@ npm run agent -- --config /etc/fillmark/agent.json --once
 FILLMARK_UPSTREAM_RPC=... ./e2e/run.sh   # anvil fork e2e, needs the market in session
 FILLMARK_UPSTREAM_RPC=... FILLMARK_E2E_SCRIPT=e2e/sell.ts ./e2e/run.sh   # take-profit sales, crypto only, any hour
 FILLMARK_UPSTREAM_RPC=... FILLMARK_E2E_SCRIPT=e2e/pay.ts ./e2e/run.sh    # Fillmark Pay on the live contracts, crypto only, any hour
+FILLMARK_UPSTREAM_RPC=... FILLMARK_E2E_SCRIPT=e2e/strategy.ts ./e2e/run.sh   # client strategies on the live router, crypto only, any hour
 ```

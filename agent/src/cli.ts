@@ -1,7 +1,7 @@
 // Fillmark client CLI: create a Kernel account with router v3 installed, check it,
 // withdraw from it, uninstall the router, and settle, release, close out or pay an agent's
 // fees, claim a payout the router could not send, or open, check and end a Fillmark Pay
-// agreement with an agent. User operations go straight to the
+// agreement with an agent, or sign the account's strategy setting. User operations go straight to the
 // EntryPoint, so no bundler is needed and the account pays no gas (gas fees in the user
 // operation are 0; the key in FILLMARK_KEY_FILE pays the transaction).
 //
@@ -57,6 +57,20 @@ import {
   revertName,
 } from "./chain.js";
 import { WAITS, payAllowance, payCloseCallData, payOpenCallData } from "./pay.js";
+import {
+  MIN_TAKE_PROFIT_BPS,
+  STRATEGIES,
+  effectiveDay,
+  fingerprint,
+  invalidReason,
+  settingDomain,
+  settingHash,
+  settingJson,
+  signerOf,
+  SETTING_TYPES,
+  type Setting,
+  type Strategy,
+} from "./settings.js";
 
 const EXECUTOR = 2n;
 const TOKENS: Record<string, { address: Address; decimals: number }> = { USDG: { address: USDG, decimals: 6 } };
@@ -76,6 +90,9 @@ const USAGE = `usage:
   fillmark pay-open   <account> --agent-id N [--allowance USDG] [--signature 0x...]
   fillmark pay-close  <account> --agent-id N [--keep-allowance] [--signature 0x...]
   fillmark pay-status <account> --agent-id N
+  fillmark strategy   <account> --agent-id N --seq N (--strategy dca --take-profit-bps N |
+                      --strategy rebalance --targets TSLA:5000,cbBTC:3000 [--cash-bps N] [--drift-bps N] [--every-days 0|7|30])
+                      [--valid-from UNIX] [--signature 0x...] [--post]
 
 --perf-fee-bps is the share of net realized gains the agent earns (0 to 3000, the agent's terms).
 --daily-limit counts buys and their fill fees over any 24 hours; sales do not count.
@@ -88,6 +105,12 @@ agreements; by default pay-open adds the rate on twice the daily buy limit for e
 the permission ends and 7 days after (--allowance sets the whole allowance instead).
 pay-close ends it and sets the allowance to 0; --keep-allowance leaves it for another open
 agreement. The agent is paid only by settling, itself.
+strategy signs the account's strategy for an agent (EIP-712, no transaction, no gas) with the key
+in FILLMARK_KEY_FILE when it is the account's owner; otherwise it prints the typed data for the
+owner to sign (eth_signTypedData_v4) and exits 2, and runs again with --signature. A setting takes
+effect at the first 00:00 UTC after --valid-from (default now), and not before the day after the
+agent sees it; --seq must be the account's last seq for that agent plus 1 (1 for the first).
+--post sends it to FILLMARK_SETTINGS_URL (default https://api.fillmark.trade/v1/settings).
 
 tickers (assets.json, exact case): ${Object.keys(ASSETS).join(",")}`;
 
@@ -577,6 +600,73 @@ async function payStatus(account: Address, agentId: bigint) {
   });
 }
 
+/// Builds, checks and signs a strategy setting; with --post, sends it to the settings API.
+async function strategy(account: Address, v: Record<string, string | undefined>, post: boolean, sig?: Hex) {
+  const router = addressArg(process.env.FILLMARK_ROUTER, "FILLMARK_ROUTER");
+  const { pub } = clients();
+  const name = v.strategy as Strategy;
+  if (!STRATEGIES.includes(name)) throw new Error(`--strategy must be ${STRATEGIES.join(" or ")}\n${USAGE}`);
+  const num = (k: string, def = "0") => {
+    const x = v[k] ?? def;
+    if (!/^\d+$/.test(x)) throw new Error(`--${k} must be a non-negative integer\n${USAGE}`);
+    return Number(x);
+  };
+  const targets = (v.targets ?? "").split(",").filter(Boolean).map((pair) => {
+    const [ticker, w] = pair.split(":");
+    if (!ticker || !isTicker(ticker) || !w || !/^\d+$/.test(w)) throw new Error(`--targets takes TICKER:BPS pairs\n${USAGE}`);
+    return { asset: ASSETS[ticker]!, ticker, weightBps: Number(w) };
+  });
+  if (!v.seq || !/^\d+$/.test(v.seq)) throw new Error(`--seq is required\n${USAGE}`);
+  const now = (await pub.getBlock()).timestamp;
+  const setting: Setting = {
+    account,
+    agentId: agentIdOf(v["agent-id"]),
+    strategy: name,
+    takeProfitBps: name === "dca" ? num("take-profit-bps", String(MIN_TAKE_PROFIT_BPS)) : 0,
+    targets: name === "rebalance" ? targets : [],
+    cashBps: name === "rebalance" ? num("cash-bps") : 0,
+    driftBps: name === "rebalance" ? num("drift-bps") : 0,
+    everyDays: name === "rebalance" ? num("every-days") : 0,
+    validFrom: v["valid-from"] ? BigInt(num("valid-from")) : now,
+    seq: BigInt(v.seq),
+  };
+  const allowed = (
+    await pub.multicall({
+      allowFailure: false,
+      contracts: Object.values(ASSETS).map((t) => ({ address: router, abi: routerAbi, functionName: "isAllowed", args: [account, t] }) as const),
+    })
+  ).flatMap((ok, i) => (ok ? [Object.values(ASSETS)[i]!] : []));
+  const why = invalidReason(setting, allowed);
+  if (why) throw new Error(`setting not valid: ${why}`);
+  const owner = await accountOwner(account);
+  const typed = { domain: settingDomain(router), types: SETTING_TYPES, primaryType: "Setting" as const, message: setting };
+  let signature = sig;
+  if (!signature) {
+    const key = senderKey();
+    if (key.address !== owner) {
+      return out({ sent: false, owner, hash: settingHash(router, setting), typedData: { ...typed, message: settingJson(setting) }, next: "sign with eth_signTypedData_v4 from the owner, then run again with --signature" });
+    }
+    signature = await key.signTypedData(typed);
+  }
+  if ((await signerOf(router, { setting, signature })) !== owner) throw new Error("the signature is not the account owner's");
+  const signed = { setting: settingJson(setting), signature };
+  const result: Record<string, unknown> = {
+    ...signed,
+    digest: settingHash(router, setting),
+    fingerprint: toHex(fingerprint(router, setting), { size: 16 }),
+    // The earliest: the agent uses a setting from the day after it first sees it.
+    takesEffect: new Date(Number((effectiveDay(setting) > now / 86_400n + 1n ? effectiveDay(setting) : now / 86_400n + 1n) * 86_400n) * 1000).toISOString(),
+  };
+  if (post) {
+    const url = process.env.FILLMARK_SETTINGS_URL ?? "https://api.fillmark.trade/v1/settings";
+    const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(signed) });
+    result.posted = r.status;
+    result.answer = await r.text();
+    if (!r.ok) process.exitCode = 1;
+  }
+  return out(result);
+}
+
 async function main() {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
@@ -596,17 +686,27 @@ async function main() {
       allowance: { type: "string" },
       "keep-allowance": { type: "boolean", default: false },
       "regular-only": { type: "boolean", default: false },
+      strategy: { type: "string" },
+      "take-profit-bps": { type: "string" },
+      targets: { type: "string" },
+      "cash-bps": { type: "string" },
+      "drift-bps": { type: "string" },
+      "every-days": { type: "string" },
+      "valid-from": { type: "string" },
+      seq: { type: "string" },
+      post: { type: "boolean", default: false },
     },
   });
   const [cmd, a1, a2, a3] = positionals;
   const sig = signatureArg(values.signature);
-  if (sig && !["install", "withdraw", "uninstall", "pay-debt", "pay-open", "pay-close"].includes(cmd ?? "")) throw new Error(`--signature is not used by ${cmd}\n${USAGE}`);
+  if (sig && !["install", "withdraw", "uninstall", "pay-debt", "pay-open", "pay-close", "strategy"].includes(cmd ?? "")) throw new Error(`--signature is not used by ${cmd}\n${USAGE}`);
   if (values.allowance !== undefined && (cmd !== "pay-open" || !/^\d+(\.\d{1,6})?$/.test(values.allowance))) throw new Error(`--allowance is a USDG amount for pay-open\n${USAGE}`);
   if (values["keep-allowance"] && cmd !== "pay-close") throw new Error(`--keep-allowance is only for pay-close\n${USAGE}`);
   if (values.owner && cmd !== "create") throw new Error(`--owner is only for create\n${USAGE}`);
   const regularOnly = values["regular-only"] === true;
   if (regularOnly && cmd !== "create" && cmd !== "install") throw new Error(`--regular-only is only for create and install\n${USAGE}`);
-  const { "regular-only": _, "keep-allowance": keepAllowance, ...strings } = values;
+  if (values.post && cmd !== "strategy") throw new Error(`--post is only for strategy\n${USAGE}`);
+  const { "regular-only": _, "keep-allowance": keepAllowance, post, ...strings } = values;
   switch (cmd) {
     case "create":
       return create(strings, regularOnly);
@@ -634,6 +734,8 @@ async function main() {
       return payClose(addressArg(a1, "account"), agentIdOf(values["agent-id"]), keepAllowance, sig);
     case "pay-status":
       return payStatus(addressArg(a1, "account"), agentIdOf(values["agent-id"]));
+    case "strategy":
+      return strategy(addressArg(a1, "account"), strings, post === true, sig);
     default:
       throw new Error(USAGE);
   }

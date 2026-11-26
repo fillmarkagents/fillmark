@@ -116,9 +116,13 @@ for (let n = 0; n < 3; n++) await seed(K, "12", n, CBBTC);
 const own = parseUnits("0.01", 18);
 await deal(E, WETH, (await wethOf(E)) + own);
 
+// No client has a setting: every account keeps the dca the agent ran before strategies.
+const settingsFile = join(work, "settings.json");
+writeFileSync(settingsFile, JSON.stringify({ settings: [] }));
+const settingsStore = join(work, "settings-store.json");
 const config = join(work, "agent.json");
 const writeConfig = (takeProfitBps: number) =>
-  writeFileSync(config, JSON.stringify({ router, agentId: String(agentId), keyFile: agent.path, deployBlock: String(deployBlock), takeProfitBps, allowExtended: true }));
+  writeFileSync(config, JSON.stringify({ router, agentId: String(agentId), keyFile: agent.path, deployBlock: String(deployBlock), takeProfitBps, allowExtended: true, settingsFile, settingsStore }));
 const pre = { E: await lotOf(E), G: await lotOf(G), K: await lotOf(K, CBBTC), Ebal: await wethOf(E), burner: await usdgOf(burner) };
 
 step("a take-profit threshold below 1 bp is refused outside fork tests");
