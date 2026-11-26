@@ -97,6 +97,9 @@ const USAGE = `usage:
 --perf-fee-bps is the share of net realized gains the agent earns (0 to 3000, the agent's terms).
 --daily-limit counts buys and their fill fees over any 24 hours; sales do not count.
 --regular-only: stocks fill only in the regular US session, never in extended hours.
+withdraw of a token the agent's open book tracks adds a settle to the same batch when every token of
+the book has a live price, so the units are booked at once; otherwise they are booked at the
+first settle after it.
 release returns fee escrow no fee can need, without pricing any token (settle prices them all).
 claim sends an address the USDG the router could not pay it (for example while USDG froze it).
 pay-open approves USDG to Fillmark Pay and opens an agreement with the agent on its current
@@ -373,14 +376,53 @@ async function withdraw(account: Address, symbol: string | undefined, amount: st
   else if (owner === sender.address) recipient = sender.address;
   else throw new Error("the account owner is a wallet: give --to with the address that receives the tokens");
   const transfer = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [recipient, value] });
-  const callData = encodeFunctionData({
+  let callData = encodeFunctionData({
     abi: kernelAbi,
     functionName: "execute",
     args: [zeroHash, encodePacked(["address", "uint256", "bytes"], [token.address, 0n, transfer])],
   });
-  const r = await sendUserOp(sender, account, owner, callData, sig);
-  if ("sent" in r) r.next = `sign userOpHash with the owner wallet (personal_sign), then run the same command with amount ${formatUnits(value, token.decimals)} and --signature`;
-  out({ account, token: symbol, amount: formatUnits(value, token.decimals), to: recipient, ...r });
+  // Units of a token the agent's open book tracks are booked when someone next syncs it, at
+  // that moment's price. A settle in the same batch books them now. Settle needs a live price
+  // for every token of the book, so without one the withdrawal goes alone and the units are
+  // booked at the first settle after it (the reference agent sends one).
+  const router = addressArg(process.env.FILLMARK_ROUTER, "FILLMARK_ROUTER");
+  let booked: string | undefined;
+  let callGas = CALL_GAS;
+  const open = await pub.readContract({ address: router, abi: routerAbi, functionName: "openBook", args: [account] });
+  let feeDue: bigint | undefined;
+  if (open !== 0n) {
+    const [lot] = await pub.readContract({ address: router, abi: routerAbi, functionName: "positionOf", args: [account, open - 1n, token.address] });
+    const { closing } = await pub.readContract({ address: router, abi: routerAbi, functionName: "bookOf", args: [account, open - 1n] });
+    const balance = await pub.readContract({ address: token.address, abi: erc20Abi, functionName: "balanceOf", args: [account] });
+    const leaves = value <= balance && balance - value < lot.qty; // units the agent bought leave the account
+    if (leaves && closing) booked = "at the close-out";
+    else if (leaves) {
+      const live = await pub.simulateContract({ address: router, abi: routerAbi, functionName: "settle", args: [account] }).then(
+        (r) => ((feeDue = r.result), true),
+        () => false,
+      );
+      if (live) {
+        const calls = [
+          { target: token.address, value: 0n, callData: transfer },
+          { target: router, value: 0n, callData: encodeFunctionData({ abi: routerAbi, functionName: "settle", args: [account] }) },
+        ];
+        const batch = encodeAbiParameters(
+          [{ type: "tuple[]", components: [{ name: "target", type: "address" }, { name: "value", type: "uint256" }, { name: "callData", type: "bytes" }] }],
+          [calls],
+        );
+        callData = encodeFunctionData({ abi: kernelAbi, functionName: "execute", args: [pad("0x01", { dir: "right", size: 32 }), batch] });
+        callGas = BOOK_GAS;
+        booked = "now, with a settle in the same batch";
+      } else booked = "at the first settle once every token of the book has a live price";
+    }
+  }
+  const r = await sendUserOp(sender, account, owner, callData, sig, callGas);
+  if ("sent" in r) {
+    r.next = `sign userOpHash with the owner wallet (personal_sign), then run the same command with amount ${formatUnits(value, token.decimals)} and --signature`;
+    if (booked) r.next += "; if prices go live or stop being live before then, the operation changes and needs a new signature";
+  }
+  const fee = feeDue ? { feeDueUsdg: formatUnits(feeDue, 6) } : {};
+  out({ account, token: symbol, amount: formatUnits(value, token.decimals), to: recipient, ...(booked ? { booked } : {}), ...fee, ...r });
 }
 
 async function status(account: Address, agentIdArg?: string) {

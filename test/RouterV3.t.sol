@@ -943,6 +943,90 @@ contract RouterV3ForkTest is ForkBase {
         assertEq(_usdg(agent) - walletBefore, fee);
     }
 
+    /// HEY Research Lab's finding: units moved out are booked at the NAV of the next sync, so
+    /// whoever calls it picks the price. Moved out at P0 with no gain, synced after a real
+    /// Chainlink round raised the price, they carry a gain the client never had.
+    function test_MoveOutBookedAtTheLaterSyncPrice() public {
+        _fair(A);
+        uint256 w = _exec(_intent(USDG, A, 1_000e6));
+        FillmarkRouterV3.Lot memory l = _lot(A);
+        uint256 atMove = router.navValueOf(w, _nav(AF), AD);
+        _ownerTransfer(A, owner, w);
+        uint256 nav = _priceUp();
+        uint256 value = router.navValueOf(w, nav, AD);
+        assertGt(value, atMove);
+        assertEq(router.settle(account), 0);
+        assertEq(_out(A).qty, w);
+        assertEq(uint256(_out(A).gain), value - l.cost);
+        assertGt(value - l.cost, atMove > l.cost ? atMove - l.cost : 0);
+        vm.warp(vm.getBlockTimestamp() + HOLD);
+        uint256 acctBefore = _usdg(account);
+        uint256 fee = router.settle(account);
+        assertEq(fee, (value - l.cost) * PERF_BPS / 1e4);
+        assertEq(acctBefore - _usdg(account), fee);
+    }
+
+    /// The fix in the client app: the withdrawal and a settle in one batch book the units at
+    /// the NAV of the withdrawal; a later price does not change what is owed.
+    function test_MoveOutBatchedWithSettleBookedAtTheMove() public {
+        _fair(A);
+        uint256 w = _exec(_intent(USDG, A, 1_000e6));
+        FillmarkRouterV3.Lot memory l = _lot(A);
+        uint256 atMove = router.navValueOf(w, _nav(AF), AD);
+        uint256 gain = atMove > l.cost ? atMove - l.cost : 0;
+        Call[] memory c = new Call[](2);
+        c[0] = Call(A, 0, abi.encodeCall(IERC20.transfer, (owner, w)));
+        c[1] = Call(address(router), 0, abi.encodeCall(FillmarkRouterV3.settle, (account)));
+        _userOp(_batch(c));
+        assertEq(_out(A).qty, w);
+        assertEq(uint256(_out(A).gain), gain);
+        uint256 later = router.navValueOf(w, _priceUp(), AD) - l.cost; // the gain a later sync would book
+        assertGt(later, gain);
+        assertEq(router.settle(account), 0);
+        assertEq(uint256(_out(A).gain), gain);
+        vm.warp(vm.getBlockTimestamp() + HOLD);
+        uint256 fee = router.settle(account);
+        assertEq(fee, gain * PERF_BPS / 1e4);
+        assertLt(fee, later * PERF_BPS / 1e4);
+    }
+
+    /// A fee already due when the client withdraws in a batch with settle is pulled from the
+    /// account's USDG inside that batch (the router calls the account back), not left as debt.
+    function test_BatchedSettlePaysAFeeDue() public {
+        _fair(A);
+        uint256 w = _exec(_intent(USDG, A, 1_000e6));
+        uint256 half = w / 2;
+        _priceUp();
+        _ownerTransfer(A, owner, half);
+        assertEq(router.settle(account), 0);
+        uint256 due = uint256(_out(A).gain) * PERF_BPS / 1e4;
+        assertGt(due, 0);
+        vm.warp(vm.getBlockTimestamp() + HOLD);
+        uint256 walletBefore = _usdg(agent);
+        Call[] memory c = new Call[](2);
+        c[0] = Call(A, 0, abi.encodeCall(IERC20.transfer, (owner, w - half)));
+        c[1] = Call(address(router), 0, abi.encodeCall(FillmarkRouterV3.settle, (account)));
+        _userOp(_batch(c));
+        assertEq(_usdg(agent) - walletBefore, due);
+        assertEq(_book().debt, 0);
+        assertEq(_out(A).qty, w - half);
+    }
+
+    /// While a stock's market is closed the batch cannot go (settle needs every price), so the
+    /// app sends the withdrawal alone, which always goes.
+    function test_WithdrawalAloneGoesWhileMarketClosed() public {
+        _fair(TSLA);
+        uint256 w = _exec(_intent(USDG, TSLA, 500e6));
+        feeds.addClosure(uint64(vm.getBlockTimestamp()), uint64(vm.getBlockTimestamp() + 1 hours));
+        Call[] memory c = new Call[](2);
+        c[0] = Call(TSLA, 0, abi.encodeCall(IERC20.transfer, (owner, w)));
+        c[1] = Call(address(router), 0, abi.encodeCall(FillmarkRouterV3.settle, (account)));
+        _userOpReverts(_batch(c), FillmarkRouterV3.MarketClosed.selector);
+        _ownerTransfer(TSLA, owner, w);
+        assertEq(IERC20(TSLA).balanceOf(owner), w);
+        assertEq(_lot(TSLA).qty, w); // booked at the first settle once the market opens
+    }
+
     function test_MovingOutAndBackDoesNotLockInALoss() public {
         uint256 w = _exec(_intent(USDG, WETH, 1_000e6));
         FillmarkRouterV3.Lot memory l = _lot(WETH);

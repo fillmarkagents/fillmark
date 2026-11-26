@@ -95,13 +95,24 @@ TypeScript (viem) tools for FillmarkRouterV3 on Robinhood Chain (4663).
   it must trade can be priced and traded now, sends at most `maxRebalanceTradesPerDay`
   (default 20) trades per account per day, and none after the permission expires. For an asset
   whose target is 0 it sells every unit it bought, the last of them even under 10 USDG.
+  Moved units (`src/keeper.ts`): the router books units a client moves out of its account,
+  or back in, only when someone next syncs that token (a settle, a fill of that asset or
+  the close-out), at that moment's NAV, so whoever picks the moment picks the price. Each
+  tick, for every account on router v3 whatever its agent, the agent sends `settle` for
+  such a move (one worth at least 1 USDG at cost) and `closeOut` for a book whose router
+  was removed, as soon as the call simulates. Settle needs a live price for every token of
+  the book; until then the account's own agent can still book a move earlier with a fill
+  of that asset. At most 10 a tick and 100 a day, 4M gas each, own clients first; it stops
+  below three times `minEth`. Router v2 books are not covered.
 - `src/cli.ts`: client tool. `create` makes a Kernel v3.1 account with the router
   installed (`--perf-fee-bps` is the agent's share of net realized gains, its terms;
   `--regular-only` keeps stock fills out of extended hours; `--daily-limit` counts buys
   and their fill fees over any 24 hours);
   `status`, `withdraw`, `uninstall` and `install` work on it. `uninstall` closes the
   agent's book at the NAV of that moment when every token can be priced; otherwise
-  `close-out` does it once prices are back. `settle` charges a due performance fee from
+  `close-out` does it once prices are back. Anyone can send it, at any later time: the
+  agent above sends it once every price is live, and the client can send it first.
+  `settle` charges a due performance fee from
   the fee escrow the router holds on sale gains (then from the account), `release`
   returns escrow no fee can need without pricing any token, `pay-debt` pays fees owed to
   an agent that was removed, and `claim` sends an address the USDG the router could not
@@ -122,7 +133,10 @@ TypeScript (viem) tools for FillmarkRouterV3 on Robinhood Chain (4663).
   print the user operation and its hash, send nothing and exit 2; the owner signs the hash
   (personal_sign) and the command runs again with `--signature` (for `install`, with the
   printed `--expiry`; for `withdraw`, with the printed amount). A wallet-owned `withdraw`
-  needs `--to`.
+  needs `--to`. A `withdraw` of a token the agent's open book tracks adds `settle` to the
+  same batch when every token of the book has a live price, so the move is booked at that
+  NAV; otherwise it goes alone and is booked at the next sync (the agent above sends one
+  once every price of the book is live).
 - `fillmark-agent.service`: systemd unit that keeps the agent running from
   `/srv/apps/fillmark/agent` with `/etc/fillmark/agent.json`, as root without capabilities.
   Set the node path in `ExecStart` to `command -v node`, copy it to `/etc/systemd/system/`,

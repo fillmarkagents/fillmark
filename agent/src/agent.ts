@@ -73,6 +73,7 @@ import {
 import type { FillIntent } from "./intent.js";
 import { WAITS, median, minReceivedPerUsdg, tokenPerUsdg, type PayState, type Terms } from "./pay.js";
 import { BPS, planRebalance, scheduleOpen } from "./rebalance.js";
+import { Keeper } from "./keeper.js";
 import { ROOT_ECDSA, SettingsBook, StoreError, effectiveDay, kernelRootAbi, validatorAbi, withFingerprint, type Mode, type Setting } from "./settings.js";
 
 export const DAY = 86_400n;
@@ -329,6 +330,7 @@ export class Agent {
   private readonly salesToday = new Map<Address, bigint>(); // USDG of this agent's sales today, per account
   private readonly rbNext = new Map<string, bigint>(); // day:account:token:side -> next rebalance nonce index
   private readonly modeKey = new Map<Address, string>(); // the mode last logged per account
+  private keeper!: Keeper; // books units clients moved, for every account on the router
 
   constructor(
     private readonly cfg: Config,
@@ -355,6 +357,7 @@ export class Agent {
     this.pauseDays = (hold + DAY - 1n) / DAY;
     this.sellGrace = BigInt(await this.pub.readContract({ address: this.cfg.router, abi: routerAbi, functionName: "SELL_GRACE" }));
     await this.payTerms();
+    this.keeper = new Keeper(this.pub, this.wallet, this.key, this.cfg.router, this.cfg.deployBlock, this.cfg.agentId, this.cfg.minEthWei, this.once.bind(this));
     const write = (p: string, text: string) => {
       mkdirSync(dirname(p), { recursive: true });
       writeFileSync(`${p}.tmp`, text);
@@ -667,6 +670,7 @@ export class Agent {
     for (const set of [this.done, this.banned]) for (const k of set) if (!k.startsWith(`${day}:`)) set.delete(k);
     for (const map of [this.retryAt, this.saleNext, this.rbNext]) for (const k of map.keys()) if (!k.startsWith(`${day}:`)) map.delete(k);
     if (!(await this.ethAbove())) return;
+    await this.keeper.tick(now).catch((err) => this.once("hour", `keeper:${revertName(err)}`, "error", "booking moved units failed", { error: revertName(err) }));
 
     try {
       await this.discover();

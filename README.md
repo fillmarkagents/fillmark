@@ -84,7 +84,7 @@ docs [docs.fillmark.trade](https://docs.fillmark.trade), updates on X [@fillmark
 Robinhood Chain (4663). Tag `v1.0.0` is the deployed source of the feeds and the first
 router, tag `v2.0.0` of the second router and the burner, tag `v3.0.0` of the current
 router, and tag `pay-v1.0.0` of Fillmark Pay. The reference agent that runs for ERC-8004
-agent 26144 is tag `agent-v0.6.0`.
+agent 26144 is tag `agent-v0.6.1`.
 
 | Contract | Address |
 | --- | --- |

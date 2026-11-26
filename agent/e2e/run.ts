@@ -383,6 +383,9 @@ assert.ok(btc > 0n);
 assert.equal(st.balances.cbBTC, formatUnits(btc, 8));
 const wb = cli(env, "withdraw", account, "cbBTC", st.balances.cbBTC);
 assert.equal(wb.code, 0, wb.err);
+// cbBTC is in the agent's book: the settle in the same batch books the move at once.
+assert.match(JSON.parse(wb.out).booked, /^now/, wb.out);
+assert.equal((await pub.readContract({ address: router, abi: routerAbi, functionName: "positionOf", args: [account, agentId, ASSETS.cbBTC] }))[0].qty, 0n);
 assert.equal(await pub.readContract({ address: ASSETS.cbBTC, abi: erc20Abi, functionName: "balanceOf", args: [client.account.address] }), btc);
 assert.equal(await pub.readContract({ address: ASSETS.cbBTC, abi: erc20Abi, functionName: "balanceOf", args: [account] }), 0n);
 
@@ -391,6 +394,7 @@ const tsla = await pub.readContract({ address: ASSETS.TSLA, abi: erc20Abi, funct
 assert.ok(tsla > 0n);
 const w = cli(env, "withdraw", account, "TSLA", "all");
 assert.equal(w.code, 0, w.err);
+assert.equal(JSON.parse(w.out).booked, undefined, w.out); // the agent bought no TSLA
 assert.equal(await pub.readContract({ address: ASSETS.TSLA, abi: erc20Abi, functionName: "balanceOf", args: [client.account.address] }), tsla);
 assert.equal(await pub.readContract({ address: ASSETS.TSLA, abi: erc20Abi, functionName: "balanceOf", args: [account] }), 0n);
 
