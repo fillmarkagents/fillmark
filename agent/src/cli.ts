@@ -1,6 +1,7 @@
 // Fillmark client CLI: create a Kernel account with router v3 installed, check it,
 // withdraw from it, uninstall the router, and settle, release, close out or pay an agent's
-// fees, or claim a payout the router could not send. User operations go straight to the
+// fees, claim a payout the router could not send, or open, check and end a Fillmark Pay
+// agreement with an agent. User operations go straight to the
 // EntryPoint, so no bundler is needed and the account pays no gas (gas fees in the user
 // operation are 0; the key in FILLMARK_KEY_FILE pays the transaction).
 //
@@ -36,11 +37,12 @@ import {
 } from "viem";
 import { getUserOperationHash } from "viem/account-abstraction";
 import type { PrivateKeyAccount } from "viem/accounts";
-import { routerAbi } from "./abi.generated.js";
+import { payAbi, routerAbi } from "./abi.generated.js";
 import {
   ECDSA_VALIDATOR,
   ENTRY_POINT,
   KERNEL_FACTORY,
+  PAY,
   ASSETS,
   ASSET_DECIMALS,
   USDG,
@@ -54,6 +56,7 @@ import {
   loadKey,
   revertName,
 } from "./chain.js";
+import { WAITS, payAllowance, payCloseCallData, payOpenCallData } from "./pay.js";
 
 const EXECUTOR = 2n;
 const TOKENS: Record<string, { address: Address; decimals: number }> = { USDG: { address: USDG, decimals: 6 } };
@@ -70,12 +73,21 @@ const USAGE = `usage:
   fillmark close-out <account> --agent-id N
   fillmark pay-debt  <account> --agent-id N [--signature 0x...]
   fillmark claim     <address>
+  fillmark pay-open   <account> --agent-id N [--allowance USDG] [--signature 0x...]
+  fillmark pay-close  <account> --agent-id N [--keep-allowance] [--signature 0x...]
+  fillmark pay-status <account> --agent-id N
 
 --perf-fee-bps is the share of net realized gains the agent earns (0 to 3000, the agent's terms).
 --daily-limit counts buys and their fill fees over any 24 hours; sales do not count.
 --regular-only: stocks fill only in the regular US session, never in extended hours.
 release returns fee escrow no fee can need, without pricing any token (settle prices them all).
 claim sends an address the USDG the router could not pay it (for example while USDG froze it).
+pay-open approves USDG to Fillmark Pay and opens an agreement with the agent on its current
+terms, tracking every asset the account allows. The account has one allowance for all its
+agreements; by default pay-open adds the rate on twice the daily buy limit for each day until
+the permission ends and 7 days after (--allowance sets the whole allowance instead).
+pay-close ends it and sets the allowance to 0; --keep-allowance leaves it for another open
+agreement. The agent is paid only by settling, itself.
 
 tickers (assets.json, exact case): ${Object.keys(ASSETS).join(",")}`;
 
@@ -505,6 +517,66 @@ async function payDebt(account: Address, agentId: bigint, sig?: Hex) {
   out({ account, agentId, debtUsdg: formatUnits(debt, 6), ...r });
 }
 
+/// Opens a Fillmark Pay agreement in one batch from the account: approve, then open.
+async function payOpen(account: Address, agentId: bigint, allowanceArg: string | undefined, sig?: Hex) {
+  const sender = senderKey();
+  const router = addressArg(process.env.FILLMARK_ROUTER, "FILLMARK_ROUTER");
+  const { pub } = clients();
+  const terms = await pub.readContract({ address: PAY, abi: payAbi, functionName: "termsOf", args: [agentId] });
+  if (terms.minZeroAtBps === 0) throw new Error(`agent ${agentId} has set no Fillmark Pay terms`);
+  const [cfgAgentId, , , , expiry, , installed, , , dailyLimit] = await pub.readContract({ address: router, abi: routerAbi, functionName: "configs", args: [account] });
+  if (!installed || cfgAgentId !== agentId) throw new Error(`agent ${agentId} has no permission on this account`);
+  const all = Object.values(ASSETS) as Address[];
+  const allowed = await Promise.all(all.map((t) => pub.readContract({ address: router, abi: routerAbi, functionName: "isAllowed", args: [account, t] })));
+  const tokens = all.filter((_, i) => allowed[i]);
+  const { carry } = await pub.readContract({ address: PAY, abi: payAbi, functionName: "agreementOf", args: [account, agentId] });
+  const given = await pub.readContract({ address: USDG, abi: erc20Abi, functionName: "allowance", args: [account, PAY] });
+  const allowance =
+    allowanceArg !== undefined ? parseUnits(allowanceArg, 6) : given + payAllowance(terms.rateBps, dailyLimit, expiry, await checkedNow(pub), carry);
+  const callData = payOpenCallData(agentId, terms.rateBps, terms.minZeroAtBps, tokens, allowance);
+  const r = await sendUserOp(sender, account, await accountOwner(account), callData, sig);
+  if ("sent" in r) r.next = `sign userOpHash with the owner wallet (personal_sign), then run the same command with --allowance ${formatUnits(allowance, 6)} and --signature`;
+  out({ account, agentId, rateBps: terms.rateBps, zeroAtBps: terms.minZeroAtBps, tokens: tokens.length, allowanceUsdg: formatUnits(allowance, 6), ...r });
+}
+
+/// Ends the agreement (what is still owed becomes carry, billed only if the account opens
+/// with this agent again) and, unless keepAllowance, sets Fillmark Pay's USDG allowance to 0,
+/// in one batch.
+async function payClose(account: Address, agentId: bigint, keepAllowance: boolean, sig?: Hex) {
+  const sender = senderKey();
+  const callData = payCloseCallData(agentId, !keepAllowance);
+  const r = await sendUserOp(sender, account, await accountOwner(account), callData, sig);
+  out({ account, agentId, ...r });
+}
+
+async function payStatus(account: Address, agentId: bigint) {
+  const { pub } = clients();
+  const [terms, a, d, tokens, allowance] = await Promise.all([
+    pub.readContract({ address: PAY, abi: payAbi, functionName: "termsOf", args: [agentId] }),
+    pub.readContract({ address: PAY, abi: payAbi, functionName: "agreementOf", args: [account, agentId] }),
+    pub.readContract({ address: PAY, abi: payAbi, functionName: "dueOf", args: [account, agentId] }),
+    pub.readContract({ address: PAY, abi: payAbi, functionName: "tokensOf", args: [account, agentId] }),
+    pub.readContract({ address: USDG, abi: erc20Abi, functionName: "allowance", args: [account, PAY] }),
+  ]);
+  const ticker = (t: Address) => Object.keys(ASSETS).find((k) => ASSETS[k] === getAddress(t)) ?? t;
+  out({
+    account,
+    agentId,
+    agentTerms: { rateBps: terms.rateBps, minZeroAtBps: terms.minZeroAtBps },
+    open: a.open,
+    rateBps: a.rateBps,
+    zeroAtBps: a.zeroAtBps,
+    tokens: tokens.map((b) => ticker(b.token)),
+    earnedUsdg: formatUnits(d.accrued, 6),
+    paidUsdg: formatUnits(d.paid, 6),
+    carryUsdg: formatUnits(d.carry, 6),
+    dueUsdg: formatUnits(d.due, 6),
+    payableNowUsdg: formatUnits(d.payNow, 6),
+    wait: WAITS[d.wait] ?? d.wait,
+    allowanceUsdg: formatUnits(allowance, 6),
+  });
+}
+
 async function main() {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
@@ -521,16 +593,20 @@ async function main() {
       owner: { type: "string" },
       to: { type: "string" },
       signature: { type: "string" },
+      allowance: { type: "string" },
+      "keep-allowance": { type: "boolean", default: false },
       "regular-only": { type: "boolean", default: false },
     },
   });
   const [cmd, a1, a2, a3] = positionals;
   const sig = signatureArg(values.signature);
-  if (sig && !["install", "withdraw", "uninstall", "pay-debt"].includes(cmd ?? "")) throw new Error(`--signature is not used by ${cmd}\n${USAGE}`);
+  if (sig && !["install", "withdraw", "uninstall", "pay-debt", "pay-open", "pay-close"].includes(cmd ?? "")) throw new Error(`--signature is not used by ${cmd}\n${USAGE}`);
+  if (values.allowance !== undefined && (cmd !== "pay-open" || !/^\d+(\.\d{1,6})?$/.test(values.allowance))) throw new Error(`--allowance is a USDG amount for pay-open\n${USAGE}`);
+  if (values["keep-allowance"] && cmd !== "pay-close") throw new Error(`--keep-allowance is only for pay-close\n${USAGE}`);
   if (values.owner && cmd !== "create") throw new Error(`--owner is only for create\n${USAGE}`);
   const regularOnly = values["regular-only"] === true;
   if (regularOnly && cmd !== "create" && cmd !== "install") throw new Error(`--regular-only is only for create and install\n${USAGE}`);
-  const { "regular-only": _, ...strings } = values;
+  const { "regular-only": _, "keep-allowance": keepAllowance, ...strings } = values;
   switch (cmd) {
     case "create":
       return create(strings, regularOnly);
@@ -552,6 +628,12 @@ async function main() {
       return closeOut(addressArg(a1, "account"), agentIdOf(values["agent-id"]));
     case "pay-debt":
       return payDebt(addressArg(a1, "account"), agentIdOf(values["agent-id"]), sig);
+    case "pay-open":
+      return payOpen(addressArg(a1, "account"), agentIdOf(values["agent-id"]), values.allowance, sig);
+    case "pay-close":
+      return payClose(addressArg(a1, "account"), agentIdOf(values["agent-id"]), keepAllowance, sig);
+    case "pay-status":
+      return payStatus(addressArg(a1, "account"), agentIdOf(values["agent-id"]));
     default:
       throw new Error(USAGE);
   }

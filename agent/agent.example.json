@@ -13,5 +13,11 @@
   "minOutBufferBps": 30,
   "deadlineSec": 300,
   "allowExtended": false,
-  "takeProfitBps": 500
+  "takeProfitBps": 500,
+  "payRateBps": 2,
+  "payMinZeroAtBps": 100,
+  "payRequired": true,
+  "paySlipBps": 300,
+  "paySamples": 30,
+  "payMinUsdg": "0.01"
 }

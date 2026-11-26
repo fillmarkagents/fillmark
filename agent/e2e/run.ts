@@ -238,7 +238,7 @@ assert.deepEqual(assetsOf(l1, account), ["NVDA"], JSON.stringify(l1));
 assert.deepEqual(assetsOf(l1, accountB), ["NVDA", "TSLA"], JSON.stringify(l1));
 assert.equal(filled(l1).length, 3, JSON.stringify(l1));
 assert.ok(l1.some((l) => l.msg === "daily fill cap reached, no more trades today"), JSON.stringify(l1));
-for (const f of filled(l1)) console.log(`   ${f.asset} fee ${f.fee}: ${f.usdg} USDG micro, cost ${f.costUsdg} USDG micro`);
+for (const f of filled(l1)) console.log(`   ${f.asset} fill fee ${f.fillFee}: ${f.usdg} USDG micro, cost ${f.costUsdg} USDG micro`);
 
 step("a new process with the same cap: today's fills are counted from chain, nothing is sent");
 const l1b = runAgent(config);

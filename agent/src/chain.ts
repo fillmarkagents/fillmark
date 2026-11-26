@@ -24,6 +24,7 @@ export const KERNEL_FACTORY: Address = "0xaac5D4240AF87249B3f71BC8E4A2cae074A3E4
 export const KERNEL_IMPL: Address = "0xBAC849bB641841b44E965fB01A4Bf5F074f84b4D"; // factory.implementation()
 export const ECDSA_VALIDATOR: Address = "0x845ADb2C711129d4f3966735eD98a9F09fC4cE57";
 export const QUOTER_V2: Address = "0x33e885eD0Ec9bF04EcfB19341582aADCb4c8A9E7"; // Uniswap docs, factory() checked on chain
+export const PAY: Address = "0x0f967E8CD8D3C9393DA64023d443b9Af691ED4D8"; // FillmarkPay, deployments/4663-pay.json
 
 // Tokens the router can price, by ticker: the list script/Deploy.s.sol registers
 // (Robinhood stock tokens, and crypto tokens that trade at any hour).

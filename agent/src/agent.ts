@@ -21,6 +21,11 @@
 // Nonces come from the account, asset and day (and the sale's number),
 // and an intent expires at the end of its day, so a restart, a retry or a client changing
 // its limits can never buy an asset twice in one day or repeat a sale.
+// Fillmark Pay: with payRateBps set, the agent keeps those terms on the Pay contract. Before a
+// fill it tracks the token in the client's open agreement, and once a UTC day it settles what
+// is due, only at a price near the median it saw over the last hour. With payRequired, once
+// the burner has its token, it buys only for accounts whose open agreement can pay what is
+// due and what the buy adds; sales of what it bought go on either way.
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -34,17 +39,19 @@ import {
   parseAbi,
   parseEther,
   parseEventLogs,
+  parseUnits,
   zeroAddress,
   type Address,
   type Hex,
 } from "viem";
 import type { PrivateKeyAccount } from "viem/accounts";
-import { feedsAbi, routerAbi } from "./abi.generated.js";
+import { burnerAbi, feedsAbi, payAbi, ponsHookAbi, routerAbi } from "./abi.generated.js";
 import {
   IDENTITY,
   KERNEL_IMPL,
   SESSIONS,
   ASSETS,
+  PAY,
   USDG,
   aggregatorAbi,
   checkedNow,
@@ -58,6 +65,7 @@ import {
   revertName,
 } from "./chain.js";
 import type { FillIntent } from "./intent.js";
+import { WAITS, median, minReceivedPerUsdg, tokenPerUsdg, type PayState, type Terms } from "./pay.js";
 
 export const DAY = 86_400n;
 const MIN_NOTIONAL = 10_000_000n; // FillmarkRouter.MIN_NOTIONAL, 10 USDG
@@ -80,7 +88,7 @@ const nonceAbi = parseAbi(["function nonceUsed(address, uint256) view returns (b
 const CONFIG_KEYS = new Set([
   "router", "agentId", "keyFile", "deployBlock", "maxFillsPerDay", "minEth", "previousRouter",
   "previousRouterUntilDay", "minPerfFeeBps", "tickSec", "maxDevBps", "minOutBufferBps", "deadlineSec", "allowExtended",
-  "takeProfitBps",
+  "takeProfitBps", "payRateBps", "payMinZeroAtBps", "payRequired", "paySlipBps", "paySamples", "payMinUsdg",
 ]);
 
 export type Config = {
@@ -99,6 +107,12 @@ export type Config = {
   deadlineSec: number;
   allowExtended: boolean;
   takeProfitBps: number; // sell when the price is this far above the lot's average cost
+  payRateBps: number | null; // Fillmark Pay terms kept on chain (null: leave them as they are)
+  payMinZeroAtBps: number;
+  payRequired: boolean; // buy only for accounts with an open Fillmark Pay agreement
+  paySlipBps: number; // a settle takes at least the hour's median price less this
+  paySamples: number; // pool prices seen in the last hour before a settle
+  payMinUsdg: bigint; // no settle for less: below it the gas costs more than the pay
 };
 
 export function loadConfig(path: string): Config {
@@ -112,11 +126,22 @@ export function loadConfig(path: string): Config {
     if (!/^\d+$/.test(v)) throw new Error(`config.${name} must be a non-negative integer`);
     return BigInt(v);
   };
+  const bool = (name: string) => {
+    const v = raw[name] ?? false;
+    if (typeof v !== "boolean") throw new Error(`config.${name} must be true or false`);
+    return v;
+  };
   const int = (name: string, def: number, min: number, max: number) => {
     const v = raw[name] ?? def;
     if (!Number.isInteger(v) || v < min || v > max) throw new Error(`config.${name} must be an integer in ${min}..${max}`);
     return v as number;
   };
+  const tickSec = int("tickSec", 60, 5, 3600);
+  // By default 30 prices, or as many as the ticks of an hour hold.
+  const paySamples = int("paySamples", Math.min(30, Math.floor(3600 / tickSec)), 1, 3600);
+  if (paySamples * tickSec > 3600) throw new Error("config.paySamples ticks must fit in one hour (paySamples x tickSec <= 3600)");
+  const payMin = String(raw.payMinUsdg ?? "0.01");
+  if (!/^\d+(\.\d{1,6})?$/.test(payMin)) throw new Error("config.payMinUsdg must be a USDG amount with at most 6 decimals");
   return {
     router: getAddress(raw.router),
     agentId: uint("agentId"),
@@ -127,13 +152,19 @@ export function loadConfig(path: string): Config {
     previousRouter: getAddress(previous),
     previousRouterUntilDay: uint("previousRouterUntilDay", "0"),
     minPerfFeeBps: int("minPerfFeeBps", 0, 0, 3000),
-    tickSec: int("tickSec", 60, 5, 3600),
+    tickSec,
     maxDevBps: int("maxDevBps", 50, 1, 1000),
     minOutBufferBps: int("minOutBufferBps", 30, 0, 1000),
     deadlineSec: int("deadlineSec", 300, 30, 3600),
     allowExtended: raw.allowExtended === true,
     // Below 1 a "take-profit" sells at a loss: only fork tests may ask for it.
     takeProfitBps: int("takeProfitBps", 500, process.env.FILLMARK_E2E_LOW_TAKE_PROFIT === "1" ? -9_000 : 1, 100_000),
+    payRateBps: raw.payRateBps === undefined ? null : int("payRateBps", 0, 0, 5),
+    payMinZeroAtBps: int("payMinZeroAtBps", 100, 1, 1000),
+    payRequired: bool("payRequired"),
+    paySlipBps: int("paySlipBps", 300, 10, 2000),
+    paySamples,
+    payMinUsdg: parseUnits(payMin, 6),
   };
 }
 
@@ -211,6 +242,7 @@ type Client = {
   debt: bigint; // fees owed to this agent: the router rejects buys until it is paid
   buys: boolean; // false after expiry: the router allows sales only, for SELL_GRACE
   regularOnly: boolean; // the client allowed fills in the regular session only
+  pay: PayState | null; // the Fillmark Pay agreement with this agent, when the agent has terms
 };
 
 /// The largest buy whose USDG and fill fee fit both the per-trade limit and what is left of
@@ -253,6 +285,16 @@ export class Agent {
   private readonly noted = new Set<string>(); // scope|key of log lines already written
   private scope = { day: "", hour: "" };
   private servedKey = "";
+  private terms: Terms = { rateBps: 0, minZeroAtBps: 0 }; // this agent's Fillmark Pay terms
+  private burner: Address = zeroAddress; // the burner whose $FILLMARK pool Fillmark Pay buys in
+  private payPool: { feeAndTaxBps: number; usdgIs0: boolean } | null = null; // read once the burner has its token
+  private readonly samples: { t: bigint; rate: bigint }[] = []; // $FILLMARK per USDG, one per tick, last hour
+  private readonly settledDay = new Map<Address, bigint>(); // account -> UTC day of its last settle
+  private readonly settleAfter = new Map<Address, bigint>(); // account -> no settle before this time
+  private readonly payOthers = new Set<Address>(); // open agreements of accounts no longer served: settled until closed or paid
+  private readonly payChecked = new Map<Address, bigint>(); // account not served -> UTC day its agreement was last read
+  private payLive = false; // the burner has its token: Fillmark Pay pays out
+  private payKnown = false; // payLive was read this tick; with payRequired, no buys when not
 
   constructor(
     private readonly cfg: Config,
@@ -278,7 +320,27 @@ export class Agent {
     const hold = BigInt(await this.pub.readContract({ address: this.cfg.router, abi: routerAbi, functionName: "hold" }));
     this.pauseDays = (hold + DAY - 1n) / DAY;
     this.sellGrace = BigInt(await this.pub.readContract({ address: this.cfg.router, abi: routerAbi, functionName: "SELL_GRACE" }));
-    log("info", "agent ready", { agentId: this.cfg.agentId, wallet, router: this.cfg.router, maxFillsPerDay: this.cfg.maxFillsPerDay });
+    await this.payTerms();
+    log("info", "agent ready", { agentId: this.cfg.agentId, wallet, router: this.cfg.router, maxFillsPerDay: this.cfg.maxFillsPerDay, pay: this.terms });
+  }
+
+  /// Keeps this agent's Fillmark Pay terms as configured. New terms apply to agreements
+  /// opened after them only.
+  private async payTerms() {
+    const read = () => this.pub.readContract({ address: PAY, abi: payAbi, functionName: "termsOf", args: [this.cfg.agentId] });
+    let t = await read();
+    const { payRateBps: rate, payMinZeroAtBps: zero } = this.cfg;
+    if (rate !== null && (t.rateBps !== rate || t.minZeroAtBps !== zero)) {
+      const { request } = await this.pub.simulateContract({ address: PAY, abi: payAbi, functionName: "setRate", args: [this.cfg.agentId, rate, zero], account: this.key });
+      const hash = await this.wallet.writeContract(request);
+      const receipt = await this.pub.waitForTransactionReceipt({ hash });
+      if (receipt.status !== "success") throw new Error(`setRate ${hash} reverted`);
+      t = await read();
+      log("info", "Fillmark Pay terms set", { rateBps: t.rateBps, minZeroAtBps: t.minZeroAtBps, tx: hash });
+    }
+    this.terms = { rateBps: t.rateBps, minZeroAtBps: t.minZeroAtBps };
+    this.burner = await this.pub.readContract({ address: PAY, abi: payAbi, functionName: "burner" });
+    if (this.cfg.payRequired && t.minZeroAtBps === 0) throw new Error("payRequired needs Fillmark Pay terms: set payRateBps");
   }
 
   /// Logs a line at most once per UTC day or hour.
@@ -382,6 +444,7 @@ export class Agent {
     });
     const day = now / DAY;
     const served: Client[] = [];
+    const unserved: Address[] = [];
     list.forEach((account, i) => {
       const [id, wallet, maxSlipBps, perfFeeBps, expiry, installId, installed, regularOnly, maxPerTrade, dailyLimit] = reads[4 * i] as readonly [
         bigint, Address, number, number, bigint, bigint, boolean, boolean, bigint, bigint,
@@ -389,6 +452,7 @@ export class Agent {
       const balance = reads[4 * i + 1] as bigint;
       const { debt } = reads[4 * i + 2] as { debt: bigint };
       const spent = reads[4 * i + 3] as bigint;
+      unserved.push(account); // taken out again below once served
       if (!installed || id !== agentId || wallet !== this.key.address || expiry + this.sellGrace < now) {
         // A fresh install may not be visible yet on the node that answered: drop only
         // accounts whose last install is older than the rescanned overlap.
@@ -411,8 +475,41 @@ export class Agent {
       }
       const buys = expiry >= now;
       if (!buys) this.once("day", `expired:${account}`, "info", "permission expired, sales only until the router's grace ends", { account, expiry });
-      served.push({ account, installId, maxSlipBps, maxPerTrade, fillFeeBps, dailyLimit, spent, balance, debt, buys, regularOnly });
+      unserved.pop();
+      served.push({ account, installId, maxSlipBps, maxPerTrade, fillFeeBps, dailyLimit, spent, balance, debt, buys, regularOnly, pay: null });
     });
+    if (this.terms.minZeroAtBps > 0 && served.length > 0) {
+      const pay = await this.pub.multicall({
+        allowFailure: false,
+        batchSize: BATCH,
+        contracts: served.flatMap((c) => [
+          { address: PAY, abi: payAbi, functionName: "agreementOf", args: [c.account, agentId] } as const,
+          { address: PAY, abi: payAbi, functionName: "tokensOf", args: [c.account, agentId] } as const,
+          { address: PAY, abi: payAbi, functionName: "dueOf", args: [c.account, agentId] } as const,
+          { address: USDG, abi: erc20Abi, functionName: "allowance", args: [c.account, PAY] } as const,
+        ]),
+      });
+      served.forEach((c, i) => {
+        const a = pay[4 * i] as { open: boolean; rateBps: number };
+        const tokens = pay[4 * i + 1] as readonly { token: Address }[];
+        const d = pay[4 * i + 2] as { due: bigint };
+        c.pay = { open: a.open, rateBps: a.rateBps, tokens: new Set(tokens.map((b) => getAddress(b.token))), due: d.due, allowance: pay[4 * i + 3] as bigint };
+      });
+    }
+    // Accounts this agent no longer serves (removed, expired, or skipped) may still owe it on
+    // an open agreement: read once a day, and settled with the others until closed or paid.
+    const unread = unserved.filter((a) => this.payChecked.get(a) !== day && !this.payOthers.has(a));
+    if (this.terms.minZeroAtBps > 0 && unread.length > 0) {
+      const open = await this.pub.multicall({
+        allowFailure: false,
+        batchSize: BATCH,
+        contracts: unread.map((account) => ({ address: PAY, abi: payAbi, functionName: "agreementOf", args: [account, agentId] }) as const),
+      });
+      unread.forEach((a, i) => {
+        this.payChecked.set(a, day);
+        if ((open[i] as { open: boolean }).open) this.payOthers.add(a);
+      });
+    }
     const key = served.map((c) => c.account).join(",");
     if (key !== this.servedKey) {
       this.servedKey = key;
@@ -465,6 +562,10 @@ export class Agent {
       this.once("hour", "discover", "error", "client discovery failed, serving known accounts", { error: revertName(err) });
     }
     const served = await this.clients(now);
+    this.payKnown = false;
+    if (this.terms.minZeroAtBps > 0) {
+      await this.payTick(served, now).catch((err) => this.once("hour", `pay:${revertName(err)}`, "error", "Fillmark Pay step failed", { error: revertName(err) }));
+    }
     // Round robin: every account's first asset, then every account's second, and so on,
     // so no single account can take the whole daily cap.
     const pairs: { c: Client; token: Address; key: string; rank: number; order: number }[] = [];
@@ -613,6 +714,11 @@ export class Agent {
       }
       const amount = c.buys ? buyAmount(c.maxPerTrade, c.dailyLimit, c.spent, c.fillFeeBps) : 0n;
       const fee = (amount * c.fillFeeBps) / 10_000n;
+      const paid = this.payable(c, amount, fee);
+      if (!sell && !paid) {
+        this.retryAt.set(t.key, now + RETRY_SEC); // an agreement or allowance may come later today
+        continue;
+      }
       if (!sell && !c.buys) continue;
       if (!sell && c.debt > 0n) continue;
       if (!sell && amount === 0n) {
@@ -677,6 +783,10 @@ export class Agent {
             });
             continue;
           }
+          if (!paid) {
+            this.retryAt.set(t.key, now + RETRY_SEC);
+            continue;
+          }
           if (sell) {
             this.once("day", `small:${t.key}`, "info", "take-profit reached but no sale fits between 10 USDG and the per-trade limit", {
               account: c.account, asset: TICKER[t.token], units,
@@ -695,6 +805,8 @@ export class Agent {
           if (r === "filled") {
             c.balance -= amount + fee;
             c.spent += amount + fee;
+            // What this buy adds to the agreement, so the next buy this tick checks against it.
+            if (c.pay?.open) c.pay.due += (BigInt(c.pay.rateBps) * amount + 9_999n) / 10_000n;
           }
         }
         if (r !== "retry") fills = this.fillsToday.size + this.revertedToday;
@@ -709,6 +821,143 @@ export class Agent {
         fills++; // a send that threw may still mine: count it until the next tick reads the logs
       }
       this.retryAt.set(t.key, now + RETRY_SEC); // no tier filled: try again later, not every tick
+    }
+  }
+
+  /// Adds a token to the client's open Fillmark Pay agreement, so fills of it are paid for.
+  private async track(c: Client, token: Address, key: string, asset: string): Promise<boolean> {
+    try {
+      const { request } = await this.pub.simulateContract({ address: PAY, abi: payAbi, functionName: "track", args: [c.account, this.cfg.agentId, token], account: this.key });
+      const hash = await this.wallet.writeContract(request);
+      const receipt = await this.pub.waitForTransactionReceipt({ hash });
+      if (receipt.status !== "success") throw new Error(`track ${hash} reverted`);
+      c.pay!.tokens.add(token);
+      log("info", "token added to the Fillmark Pay agreement", { account: c.account, asset, tx: hash });
+      return true;
+    } catch (err) {
+      this.once("hour", `track:${key}:${revertName(err)}`, "warn", "could not add the token to the Fillmark Pay agreement, no fill now", { account: c.account, asset, error: revertName(err) });
+      return false;
+    }
+  }
+
+  /// With payRequired, once Fillmark Pay pays out: whether a buy of `amount` for this account
+  /// would be paid for. Its open agreement must allow and hold what is due plus what the buy
+  /// adds at the agreement's rate; the buy's USDG and fill fee come on top of what is due.
+  private payable(c: Client, amount: bigint, fee: bigint): boolean {
+    if (!this.cfg.payRequired) return true;
+    if (!this.payKnown) {
+      this.once("hour", "payunknown", "warn", "could not read whether Fillmark Pay pays out: no buys this tick");
+      return false;
+    }
+    if (!this.payLive) return true;
+    const p = c.pay;
+    if (!p?.open) {
+      this.once("day", `nopay:${c.account}`, "info", "no open Fillmark Pay agreement with this agent: no buys", { account: c.account });
+      return false;
+    }
+    const adds = (BigInt(p.rateBps) * amount + 9_999n) / 10_000n;
+    if (p.allowance < p.due + adds || c.balance < amount + fee + p.due) {
+      this.once("day", `payshort:${c.account}`, "info", "Fillmark Pay allowance or USDG below what is due and what a buy adds: no buys", {
+        account: c.account, due: p.due, allowance: p.allowance, balance: c.balance,
+      });
+      return false;
+    }
+    return true;
+  }
+
+  /// One pool price sample per tick, then once a UTC day per account a settle of what is due.
+  /// The agent bears the pool price, so it pays only at a price near the hour's median: a
+  /// price pushed up against it makes the settle wait, never pay less.
+  private async payTick(served: Client[], now: bigint) {
+    // The burner's token is set once; until then nothing can be paid.
+    if (!this.payLive) this.payLive = (await this.pub.readContract({ address: this.burner, abi: burnerAbi, functionName: "token" })) !== zeroAddress;
+    this.payKnown = true;
+    if (!this.payLive) return;
+    if (!this.payPool) {
+      const key = await this.pub.readContract({ address: this.burner, abi: burnerAbi, functionName: "poolKey" });
+      // Pons pools take no LP fee; the minimum below counts only the hook's fees on the output.
+      if (key.fee !== 0) throw new Error(`the burner's pool has an LP fee (${key.fee}): settles need a minimum that counts it`);
+      const id = await this.pub.readContract({ address: this.burner, abi: burnerAbi, functionName: "poolId" });
+      const l = await this.pub.readContract({ address: key.hooks, abi: ponsHookAbi, functionName: "launches", args: [id] });
+      if (!l.registered) throw new Error("the burner's pool is not a registered Pons launch");
+      // Fixed when the pool was registered (the hook's launch record holds static fields only).
+      this.payPool = { feeAndTaxBps: l.hookFeeBps + l.creatorTaxBps, usdgIs0: getAddress(key.currency0) === USDG };
+    }
+    const sqrtP = await this.pub.readContract({ address: this.burner, abi: burnerAbi, functionName: "sqrtPriceX96" });
+    const rate = tokenPerUsdg(sqrtP, this.payPool.usdgIs0);
+    this.samples.push({ t: now, rate });
+    while (this.samples.length > 0 && this.samples[0]!.t + 3600n < now) this.samples.shift();
+
+    const day = now / DAY;
+    const servedOpen = served.filter((c) => c.pay?.open).map((c) => c.account);
+    const accounts = [...new Set([...servedOpen, ...this.payOthers])].filter(
+      (a) => this.settledDay.get(a) !== day && (this.settleAfter.get(a) ?? 0n) <= now,
+    );
+    if (accounts.length === 0) return;
+    if (this.samples.length < this.cfg.paySamples) {
+      this.once("hour", "paysamples", "info", "Fillmark Pay: not enough pool prices seen yet to settle", { seen: this.samples.length, need: this.cfg.paySamples });
+      return;
+    }
+    const ref = median(this.samples.map((x) => x.rate));
+    const slip = BigInt(this.cfg.paySlipBps);
+    if (rate * 10_000n < ref * (10_000n - slip) || rate * 10_000n > ref * (10_000n + slip)) {
+      this.once("hour", "payprice", "info", "Fillmark Pay: the pool price is away from the hour's median, settles wait", { rate, median: ref });
+      return;
+    }
+    const minOut = minReceivedPerUsdg(ref, this.payPool.feeAndTaxBps, this.cfg.paySlipBps);
+    for (const account of accounts) {
+      const d = await this.pub.readContract({ address: PAY, abi: payAbi, functionName: "dueOf", args: [account, this.cfg.agentId] });
+      const wait = WAITS[d.wait] ?? String(d.wait);
+      if (wait === "NotOpen") {
+        this.payOthers.delete(account);
+        continue;
+      }
+      if (d.payNow === 0n || d.payNow < this.cfg.payMinUsdg) {
+        // Nothing, or too little to be worth the gas: looked at again tomorrow, unless the
+        // block budget or the burner's buy held it back.
+        if (wait !== "BlockBudget" && wait !== "BurnThisBlock") this.settledDay.set(account, day);
+        if (wait === "NothingDue" && !servedOpen.includes(account)) this.payOthers.delete(account);
+        if (d.payNow === 0n && wait !== "NothingDue") this.once("day", `paywait:${account}:${wait}`, "info", "Fillmark Pay: nothing can be paid now", { account, due: d.due, wait });
+        continue;
+      }
+      if (!(await this.ethAbove())) return;
+      const args = [account, this.cfg.agentId, minOut] as const;
+      let request;
+      try {
+        ({ request } = await this.pub.simulateContract({ address: PAY, abi: payAbi, functionName: "settle", args, account: this.key }));
+      } catch (err) {
+        this.once("hour", `settle:${account}:${revertName(err)}`, "info", "Fillmark Pay: settle refused now", { account, error: revertName(err) });
+        this.settleAfter.set(account, now + RETRY_SEC);
+        continue;
+      }
+      const gas = ((await this.pub.estimateContractGas({ address: PAY, abi: payAbi, functionName: "settle", args, account: this.key })) * 13n) / 10n;
+      const hash = await this.wallet.writeContract({ ...request, gas });
+      const receipt = await this.pub.waitForTransactionReceipt({ hash });
+      if (receipt.status !== "success") {
+        this.settledDay.set(account, day); // it cost gas: not again today
+        log("error", "Fillmark Pay settle reverted on chain", { account, tx: hash });
+        continue;
+      }
+      const [ev] = parseEventLogs({ abi: payAbi, eventName: "Settled", logs: receipt.logs.filter((l) => getAddress(l.address) === PAY) });
+      if (!ev) {
+        // Nothing was payable by the time it landed (the burner bought, or the block's budget
+        // went to others): tried again later.
+        this.settleAfter.set(account, now + RETRY_SEC);
+        log("info", "Fillmark Pay settle paid nothing", { account, tx: hash });
+        continue;
+      }
+      // Paid in full, or as much as the account's balance or allowance let it: done today. A
+      // part held back by the block budget is paid on a later tick.
+      if (ev.args.unpaid === 0n || wait === "Balance" || wait === "Allowance") this.settledDay.set(account, day);
+      log("info", "Fillmark Pay settled", {
+        account,
+        usdgPaid: ev.args.usdgPaid,
+        fillmarkToAgent: ev.args.fillmarkToAgent,
+        fillmarkBurned: ev.args.fillmarkBurned,
+        unpaid: ev.args.unpaid,
+        wait,
+        tx: hash,
+      });
     }
   }
 
@@ -839,6 +1088,10 @@ export class Agent {
       this.once("hour", `rejected:${key}:${side}:${revertName(err)}`, "info", "router refused the fill now", { account: c.account, asset, side, error: revertName(err) });
       return "rejected";
     }
+    // A fill of a token the open agreement does not track is never paid for: no buy without
+    // it, while a sale goes on, as it is the client's exit.
+    const stock = side === "buy" ? it.tokenOut : it.tokenIn;
+    if (c.pay?.open && !c.pay.tokens.has(stock) && !(await this.track(c, stock, key, asset)) && side === "buy") return "rejected";
     const gas = await this.pub.estimateContractGas({ address: router, abi: routerAbi, functionName: "execute", args: [it], account: this.key });
     if (gas > GAS_CAP) {
       this.banned.add(key);

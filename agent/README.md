@@ -48,8 +48,20 @@ TypeScript (viem) tools for FillmarkRouterV3 on Robinhood Chain (4663).
   under the same nonce on `previousRouter` (the v2 router clients move from) also counts,
   so the day a client moves never buys twice. Quotes and fills also stop at `maxSlipBps`
   from the pool's spot price: a trade too large for the pool depth inside that range never
-  fills, is logged once and is tried again every 15 minutes. Config: see
-  `agent.example.json`.
+  fills, is logged once and is tried again every 15 minutes.
+  Fillmark Pay: with `payRateBps` (0 to 5) set, the agent keeps its terms on FillmarkPay
+  with `setRate` at start (rate, and `payMinZeroAtBps`, default 100, as the lowest cost level
+  a client may open with). Before a fill of an asset an account's open agreement does not
+  track, it sends `track`; a buy waits if that fails, a sale goes on. With `payRequired`,
+  once the burner has its token, it buys only for accounts whose open agreement allows and
+  holds what is due plus what the buy adds, and still sells what it bought for the others.
+  It reads the $FILLMARK pool price each tick and keeps the last hour of them. Once a UTC
+  day per open agreement (also of accounts it no longer serves, until paid or closed) it
+  settles what can be paid now, again later that day when the block budget held part back:
+  only with at least `paySamples` prices seen (default 30, or as many as an hour of ticks
+  holds), the current one within `paySlipBps` (default 300, 3%) of their median, at least
+  `payMinUsdg` (default 0.01) payable, and with a minimum of that median less the pool's
+  swap fees, the 10% burn and `paySlipBps`. Config: see `agent.example.json`.
 - `src/cli.ts`: client tool. `create` makes a Kernel v3.1 account with the router
   installed (`--perf-fee-bps` is the agent's share of net realized gains, its terms;
   `--regular-only` keeps stock fills out of extended hours; `--daily-limit` counts buys
@@ -60,7 +72,13 @@ TypeScript (viem) tools for FillmarkRouterV3 on Robinhood Chain (4663).
   the fee escrow the router holds on sale gains (then from the account), `release`
   returns escrow no fee can need without pricing any token, `pay-debt` pays fees owed to
   an agent that was removed, and `claim` sends an address the USDG the router could not
-  pay it (for example while USDG froze it). User operations
+  pay it (for example while USDG froze it). `pay-open` opens a Fillmark Pay agreement
+  with the account's agent on its current terms in one batch (a USDG allowance for
+  FillmarkPay, one for all the account's agreements, to which it adds by default the rate on
+  twice the daily buy limit for each day until the permission ends and 7 days after; then
+  `open` tracking every allowed asset), `pay-close` ends it and sets the allowance to 0
+  (`--keep-allowance` leaves it for another open agreement), and `pay-status` shows what is
+  earned, paid and due. User operations
   are hashed locally (chain 4663, EntryPoint v0.7) and sent to the EntryPoint by the key
   in `FILLMARK_KEY_FILE` with zero gas fees, so no bundler is needed and the account needs
   no ETH. By default that key is also the owner and signs. With `--owner`, `create` makes
@@ -94,4 +112,5 @@ npm run cli -- status <account>          # FILLMARK_ROUTER=0x...
 npm run agent -- --config /etc/fillmark/agent.json --once
 FILLMARK_UPSTREAM_RPC=... ./e2e/run.sh   # anvil fork e2e, needs the market in session
 FILLMARK_UPSTREAM_RPC=... FILLMARK_E2E_SCRIPT=e2e/sell.ts ./e2e/run.sh   # take-profit sales, crypto only, any hour
+FILLMARK_UPSTREAM_RPC=... FILLMARK_E2E_SCRIPT=e2e/pay.ts ./e2e/run.sh    # Fillmark Pay on the live contracts, crypto only, any hour
 ```
