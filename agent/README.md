@@ -102,7 +102,8 @@ TypeScript (viem) tools for FillmarkRouterV3 on Robinhood Chain (4663).
   such a move (one worth at least 1 USDG at cost) and `closeOut` for a book whose router
   was removed, as soon as the call simulates. Settle needs a live price for every token of
   the book; until then the account's own agent can still book a move earlier with a fill
-  of that asset. At most 10 a tick and 100 a day, 4M gas each, own clients first; it stops
+  of that asset. At most 10 a tick and 100 a day, 4M gas each, largest value first (the
+  units it books at the latest reference price, whatever the account's agent); it stops
   below three times `minEth`. Router v2 books are not covered.
 - `src/cli.ts`: client tool. `create` makes a Kernel v3.1 account with the router
   installed (`--perf-fee-bps` is the agent's share of net realized gains, its terms;
@@ -136,7 +137,9 @@ TypeScript (viem) tools for FillmarkRouterV3 on Robinhood Chain (4663).
   needs `--to`. A `withdraw` of a token the agent's open book tracks adds `settle` to the
   same batch when every token of the book has a live price, so the move is booked at that
   NAV; otherwise it goes alone and is booked at the next sync (the agent above sends one
-  once every price of the book is live).
+  once every price of the book is live), and the output carries a `warning`: until then a
+  fill of that asset by the account's agent books the units at the price of the moment
+  the agent picks.
 - `fillmark-agent.service`: systemd unit that keeps the agent running from
   `/srv/apps/fillmark/agent` with `/etc/fillmark/agent.json`, as root without capabilities.
   Set the node path in `ExecStart` to `command -v node`, copy it to `/etc/systemd/system/`,

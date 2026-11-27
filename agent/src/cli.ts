@@ -99,7 +99,7 @@ const USAGE = `usage:
 --regular-only: stocks fill only in the regular US session, never in extended hours.
 withdraw of a token the agent's open book tracks adds a settle to the same batch when every token of
 the book has a live price, so the units are booked at once; otherwise they are booked at the
-first settle after it.
+first settle after it, or earlier at the price of the agent's next fill of that asset (the CLI warns).
 release returns fee escrow no fee can need, without pricing any token (settle prices them all).
 claim sends an address the USDG the router could not pay it (for example while USDG froze it).
 pay-open approves USDG to Fillmark Pay and opens an agreement with the agent on its current
@@ -396,6 +396,7 @@ async function withdraw(account: Address, symbol: string | undefined, amount: st
   // booked at the first settle after it (the reference agent sends one).
   const router = addressArg(process.env.FILLMARK_ROUTER, "FILLMARK_ROUTER");
   let booked: string | undefined;
+  let warning: string | undefined;
   let callGas = CALL_GAS;
   const open = await pub.readContract({ address: router, abi: routerAbi, functionName: "openBook", args: [account] });
   let feeDue: bigint | undefined;
@@ -406,9 +407,10 @@ async function withdraw(account: Address, symbol: string | undefined, amount: st
     const leaves = value <= balance && balance - value < lot.qty; // units the agent bought leave the account
     if (leaves && closing) booked = "at the close-out";
     else if (leaves) {
+      let why = "";
       const live = await pub.simulateContract({ address: router, abi: routerAbi, functionName: "settle", args: [account] }).then(
         (r) => ((feeDue = r.result), true),
-        () => false,
+        (err) => ((why = revertName(err)), false),
       );
       if (live) {
         const calls = [
@@ -422,7 +424,17 @@ async function withdraw(account: Address, symbol: string | undefined, amount: st
         callData = encodeFunctionData({ abi: kernelAbi, functionName: "execute", args: [pad("0x01", { dir: "right", size: 32 }), batch] });
         callGas = BOOK_GAS;
         booked = "now, with a settle in the same batch";
-      } else booked = "at the first settle once every token of the book has a live price";
+      } else {
+        booked = "at the first settle once every token of the book has a live price";
+        const [, , , perfFeeBps] = await pub.readContract({ address: router, abi: routerAbi, functionName: "configs", args: [account] });
+        // The router's price checks (_priced); anything else is reported as it is.
+        const priceless = /^(MarketClosed|StaleFeed|OraclePaused|MultiplierNotPriced|BadFeed)/.test(why);
+        warning =
+          `${priceless ? "a price the router needs is not live" : `settle cannot run now (${why})`}, so these units are not booked now. ` +
+          "Until a settle books them, a fill of this asset by the agent books them " +
+          `at the reference price of the moment the agent chooses to fill${perfFeeBps > 0 ? ", and that price sets the gain its performance fee is taken on" : ""}. ` +
+          "To have them booked at the price of the moment they leave, withdraw while every token of the book has a live price.";
+      }
     }
   }
   const r = await sendUserOp(sender, account, owner, callData, sig, callGas);
@@ -431,7 +443,7 @@ async function withdraw(account: Address, symbol: string | undefined, amount: st
     if (booked) r.next += "; if prices go live or stop being live before then, the operation changes and needs a new signature";
   }
   const fee = feeDue ? { feeDueUsdg: formatUnits(feeDue, 6) } : {};
-  out({ account, token: symbol, amount: formatUnits(value, token.decimals), to: recipient, ...(booked ? { booked } : {}), ...fee, ...r });
+  out({ account, token: symbol, amount: formatUnits(value, token.decimals), to: recipient, ...(booked ? { booked } : {}), ...(warning ? { warning } : {}), ...fee, ...r });
 }
 
 async function status(account: Address, agentIdArg?: string) {

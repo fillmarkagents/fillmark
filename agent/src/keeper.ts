@@ -4,10 +4,10 @@
 // account as soon as every price of its book is live, and closes a book a removal left open.
 // Settle needs every token of the book priced, so while one is not, the account's own agent
 // can still book a move earlier with a fill of that asset (the router syncs the fill's token).
-import { erc20Abi, getAddress, parseAbi, type Address } from "viem";
+import { erc20Abi, getAddress, parseAbi, zeroAddress, type Address } from "viem";
 import type { PrivateKeyAccount } from "viem/accounts";
-import { routerAbi } from "./abi.generated.js";
-import { clients, log, revertName, type PublicClient } from "./chain.js";
+import { feedsAbi, routerAbi } from "./abi.generated.js";
+import { aggregatorAbi, clients, log, revertName, type PublicClient } from "./chain.js";
 
 const LOG_CHUNK = 5_000_000n;
 const RESCAN = 200n;
@@ -23,7 +23,8 @@ const moduleAbi = parseAbi(["function isModuleInstalled(uint256 moduleTypeId, ad
 
 type Once = (per: "day" | "hour", key: string, level: "info" | "warn" | "error", msg: string, fields?: Record<string, unknown>) => void;
 type Wallet = NonNullable<ReturnType<typeof clients>["wallet"]>;
-export type Due = { account: Address; agentId: bigint; call: "settle" | "closeOut"; state: string };
+/// value: USDG (6 decimals) at stake, the units the call books at the latest reference price.
+export type Due = { account: Address; agentId: bigint; call: "settle" | "closeOut"; state: string; value: bigint };
 type Read = { status: "success" | "failure"; result?: unknown };
 
 export class Keeper {
@@ -32,6 +33,8 @@ export class Keeper {
   private readonly notBefore = new Map<Address, bigint>();
   private readonly sentState = new Map<Address, string>(); // the book state of the last send that went through
   private day = -1n;
+  private feeds?: Address;
+  private readonly feedOf = new Map<Address, { feed: Address; decimals: number }>();
   private sentToday = 0;
 
   constructor(
@@ -53,8 +56,9 @@ export class Keeper {
       this.sentToday = 0;
     }
     await this.discover();
-    // This agent's own clients first.
-    const due = (await this.due(now)).sort((a, b) => Number(b.agentId === this.agentId) - Number(a.agentId === this.agentId));
+    // Largest value at stake first, whoever the agent: accounts made only to fill the daily
+    // limit go last unless they move as much as real clients.
+    const due = (await this.due(now)).sort((a, b) => (a.value === b.value ? 0 : a.value > b.value ? -1 : 1));
     let sent = 0;
     for (const d of due) {
       if ((this.notBefore.get(d.account) ?? 0n) > now || this.sentState.get(d.account) === d.state) continue;
@@ -127,6 +131,10 @@ export class Keeper {
     );
     const moved = new Set<Address>();
     const state = new Map<Address, string>();
+    type Units = { token: Address; qty: bigint; cost: bigint };
+    const book = new Map<Address, Units[]>(); // the units a close-out books
+    const move = new Map<Address, Units[]>(); // the units moved and not booked
+    const add = (m: Map<Address, Units[]>, a: Address, u: Units) => m.set(a, [...(m.get(a) ?? []), u]);
     cells.forEach((c, i) => {
       const [b, p] = [reads[2 * i], reads[2 * i + 1]];
       if (!ok(b) || !ok(p)) return;
@@ -135,14 +143,58 @@ export class Keeper {
       const outQty = out.until !== 0n && out.until <= now ? 0n : out.qty; // _mature drops a matured out first
       state.set(c.account, `${state.get(c.account) ?? ""}${c.token}:${bal}:${lot.qty}:${outQty};`);
       const goneCost = bal < lot.qty ? (lot.cost * (lot.qty - bal)) / lot.qty : 0n;
-      if ((bal < lot.qty && goneCost >= DUST) || (bal > lot.qty && outQty !== 0n)) moved.add(c.account);
+      const back = bal > lot.qty && outQty !== 0n ? (bal - lot.qty < outQty ? bal - lot.qty : outQty) : 0n;
+      add(book, c.account, { token: c.token, qty: lot.qty + back, cost: 0n });
+      if (bal < lot.qty && goneCost >= DUST) {
+        moved.add(c.account);
+        add(move, c.account, { token: c.token, qty: lot.qty - bal, cost: goneCost });
+      } else if (back !== 0n) {
+        moved.add(c.account);
+        add(move, c.account, { token: c.token, qty: back, cost: 0n });
+      }
     });
-    return rows.flatMap((r): Due[] => {
+    const due = rows.flatMap((r): (Omit<Due, "value"> & { units: Units[] })[] => {
       const s = state.get(r.account) ?? "";
-      if (r.removed) return [{ account: r.account, agentId: r.agentId, call: "closeOut", state: `closeOut;${s}` }];
-      if (moved.has(r.account)) return [{ account: r.account, agentId: r.agentId, call: "settle", state: s }];
+      if (r.removed) return [{ account: r.account, agentId: r.agentId, call: "closeOut", state: `closeOut;${s}`, units: book.get(r.account) ?? [] }];
+      if (moved.has(r.account)) return [{ account: r.account, agentId: r.agentId, call: "settle", state: s, units: move.get(r.account) ?? [] }];
       return [];
     });
+    if (due.length === 0) return [];
+    const price = await this.prices([...new Set(due.flatMap((d) => d.units.map((u) => u.token)))]);
+    // A token with no positive answer is valued at the cost of the units moved out, else 0.
+    const worth = (u: Units) => {
+      const p = price.get(u.token);
+      return p ? (u.qty * p.answer) / 10n ** BigInt(p.decimals + 2) : u.cost;
+    };
+    return due.map(({ units, ...d }): Due => ({ ...d, value: units.reduce((v, u) => v + worth(u), 0n) }));
+  }
+
+  /// Each token's latest reference answer (8 decimals) and token decimals, from the router's
+  /// feeds; only to rank accounts, so an old answer is fine and a missing one is left out.
+  private async prices(tokens: Address[]) {
+    const out = new Map<Address, { answer: bigint; decimals: number }>();
+    this.feeds ??= await this.pub.readContract({ address: this.router, abi: routerAbi, functionName: "feeds" });
+    const feeds = this.feeds;
+    const unknown = tokens.filter((t) => !this.feedOf.has(t));
+    const meta = await this.reads(
+      unknown.flatMap((t) => [
+        { address: feeds, abi: feedsAbi, functionName: "feedOf", args: [t] },
+        { address: feeds, abi: feedsAbi, functionName: "decimalsOf", args: [t] },
+      ]),
+    );
+    // The feeds contract is add-only, so a token's feed and decimals never change.
+    unknown.forEach((t, i) => {
+      const [f, d] = [meta[2 * i], meta[2 * i + 1]];
+      if (f?.status === "success" && d?.status === "success" && f.result !== zeroAddress) this.feedOf.set(t, { feed: f.result as Address, decimals: Number(d.result) });
+    });
+    const known = tokens.flatMap((t) => (this.feedOf.has(t) ? [{ token: t, ...this.feedOf.get(t)! }] : []));
+    const rounds = await this.reads(known.map((k) => ({ address: k.feed, abi: aggregatorAbi, functionName: "latestRoundData" })));
+    known.forEach((k, i) => {
+      const r = rounds[i];
+      const answer = r?.status === "success" ? (r.result as readonly bigint[])[1] : 0n;
+      if (answer > 0n) out.set(k.token, { answer, decimals: k.decimals });
+    });
+    return out;
   }
 
   private async send(d: Due, now: bigint): Promise<boolean> {

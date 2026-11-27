@@ -2,8 +2,10 @@
 // moved, for accounts of any agent. A client of another agent (20% performance fee) moves
 // WETH the agent bought out of its account straight from the owner wallet, with no settle:
 // the agent settles it at the next tick. Another client removes the router during a crypto
-// halt, so its close-out cannot run: the agent waits, then closes the book when prices are
-// back. Crypto trades at any hour, so this runs while US stocks are closed.
+// halt, so its close-out cannot run; a third withdraws with the CLI during the halt, which
+// warns that the units are not booked now, and a fourth moves units out from its wallet: the
+// agent waits, then books them when prices are back, largest value first, not install order. Crypto trades at any hour,
+// so this runs while US stocks are closed.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -137,9 +139,15 @@ step("the next tick sends nothing for X");
 const l2 = runAgent(config);
 assert.equal(l2.filter((x) => x.msg === "moved units booked").length, 0, JSON.stringify(l2));
 
-step("Y: the client removes the router during a crypto halt, so its close-out waits");
+step("Z, then Y and V (installed after Z, larger books): the other agent buys WETH for all three");
+const Z = await account("Z", "23");
+await seed(Z, "20");
 const Y = await account("Y", "22");
 await seed(Y, "50");
+const V = await account("V", "24");
+await seed(V, "35");
+
+step("Y: the client removes the router during a crypto halt, so its close-out waits");
 // The live guardian adds the halt (anvil sends for it without its key).
 await test.setBalance({ address: FEEDS_GUARDIAN, value: 10n ** 18n });
 const now = (await pub.getBlock()).timestamp;
@@ -151,17 +159,36 @@ await test.mine({ blocks: 1 });
 await ownerCall(Y, encodeFunctionData({ abi: kernelAbi, functionName: "uninstallModule", args: [2n, router, "0x"] }));
 assert.equal((await pub.readContract({ address: router, abi: routerAbi, functionName: "bookOf", args: [Y, otherId] })).closing, true);
 
+step("Z: a CLI withdrawal during the halt goes alone and warns that the units are not booked now");
+const zLot = await lotOf(Z);
+const wz = cli(env, "withdraw", Z, "WETH", "all");
+assert.equal(wz.code, 0, wz.err);
+const wzOut = JSON.parse(wz.out);
+assert.match(wzOut.booked, /^at the first settle/, wz.out);
+assert.match(wzOut.warning, /not live, so these units are not booked now/, wz.out);
+assert.match(wzOut.warning, /performance fee/, wz.out); // 20% fee
+assert.equal(await wethOf(Z), 0n);
+assert.equal((await lotOf(Z)).qty, zLot.qty, "the halt left the units unbooked");
+
+step("V: the client moves its WETH out from the owner wallet during the halt");
+const vLot = await lotOf(V);
+await ownerCall(V, encodeFunctionData({ abi: kernelAbi, functionName: "execute", args: [zeroHash, encodePacked(["address", "uint256", "bytes"], [WETH, 0n, encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [client.account.address, vLot.qty] })])] }));
+
 step("during the halt the agent waits");
 const l3 = runAgent(config);
 assert.ok(l3.some((x) => x.msg === "moved units wait for a live price" && x.account === Y && x.call === "closeOut"), JSON.stringify(l3));
+for (const a of [Z, V]) assert.ok(l3.some((x) => x.msg === "moved units wait for a live price" && x.account === a && x.call === "settle"), JSON.stringify(l3));
 assert.equal(l3.filter((x) => x.msg === "moved units booked").length, 0, JSON.stringify(l3));
 
-step("after the halt the agent closes the book");
+step("after the halt the agent books all three by value, not install order: Y (close-out), V, then Z");
 await test.increaseTime({ seconds: 600 });
 await test.mine({ blocks: 1 });
 const l4 = runAgent(config);
 const b4 = l4.filter((x) => x.msg === "moved units booked");
-assert.deepEqual(b4.map((x) => [x.account, x.call]), [[Y, "closeOut"]], JSON.stringify(l4));
+assert.deepEqual(b4.map((x) => [x.account, x.call]), [[Y, "closeOut"], [V, "settle"], [Z, "settle"]], JSON.stringify(l4));
+assert.equal((await lotOf(Z)).qty, 0n);
+assert.equal((await outOf(Z)).qty, zLot.qty);
+assert.equal((await outOf(V)).qty, vLot.qty);
 assert.equal(await pub.readContract({ address: router, abi: routerAbi, functionName: "openBook", args: [Y] }), 0n);
 assert.equal((await pub.readContract({ address: router, abi: routerAbi, functionName: "bookOf", args: [Y, otherId] })).closing, false);
 
