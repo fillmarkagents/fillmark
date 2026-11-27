@@ -6,7 +6,7 @@ import { getAddress, type Hex } from "viem";
 import { ASSETS, ROUTER_V3 } from "../src/config";
 import type { Fill } from "../src/record";
 import {
-  accountGroup, buyNonce, fillIdOf, fingerprint, invalidReason, parseSetting, rebalanceNonce, saleNonce, settingHash, signerOf, tagFills, withFingerprint, type Setting,
+  accountGroup, buyNonce, fillIdOf, fingerprint, invalidReason, parseSetting, rebalanceNonce, saleNonce, sdkNonce, settingHash, signerOf, tagFills, withFingerprint, type Setting,
 } from "../src/strategy";
 
 const token = (t: string) => getAddress(ASSETS.find((a) => a.ticker === t)!.token);
@@ -86,4 +86,25 @@ assert.equal(accountGroup(fills.slice(3, 5), tags), "rebalance");
 assert.equal(accountGroup(fills.slice(0, 5), tags), "mixed");
 assert.equal(accountGroup(fills.slice(5), tags), "unattributed");
 console.log("OK   fill tags and account groups");
+
+// Fills sent with @fillmark/sdk: n counts buys and sales of the pair together, under one install.
+const sdk = (stock: typeof WETH, buy: boolean, n: bigint, fp: bigint | null, nonceInstall = 4n): Fill => {
+  const base = sdkNonce(ROUTER_V3, 7n, nonceInstall, account, stock, day, n);
+  return { ...fill(stock, buy, fp === null ? base : withFingerprint(fp, base)), installId: 4n } as Fill;
+};
+const viaSdk = [
+  sdk(WETH, true, 0n, fpD),
+  sdk(WETH, true, 1n, fpD),
+  sdk(WETH, false, 2n, fpD), // the pair's third fill of the day
+  sdk(CBBTC, true, 0n, fpR),
+  sdk(CBBTC, true, 1n, null), // the SDK with no setting
+  sdk(CBBTC, true, 2n, fpR, 5n), // a nonce built for another install than the fill's
+];
+const sdkTags = tagFills(viaSdk, settings);
+const st = (i: number) => sdkTags.get(viaSdk[i]!.fillId.toLowerCase());
+for (const i of [0, 1, 2]) assert.deepEqual(st(i), { strategy: "dca", setting: settingHash(dca) });
+assert.deepEqual(st(3), { strategy: "rebalance", setting: settingHash(rebalance) });
+assert.equal(st(4), undefined, "an SDK fill without a setting is not attributed");
+assert.equal(st(5), undefined, "the nonce must be from the install the fill ran under");
+console.log("OK   SDK fill tags");
 console.log("ALL OK");

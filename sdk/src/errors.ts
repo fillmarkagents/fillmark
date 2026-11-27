@@ -58,6 +58,11 @@ export const REASONS: Readonly<Record<string, string>> = Object.freeze({
   RpcError: "A read or send through the RPC failed.",
   UnknownQuote: "This quote was not made by this agent instance.",
   Unreadable: "The asset's state could not be read.",
+  SettingsUnavailable: "The client's strategy settings could not be read; the account is not traded until they can be.",
+  SettingBlocked: "The client's strategy setting cannot be followed now.",
+  StrategyNotFollowed: "The client chose a strategy this agent does not follow.",
+  SettingChanged: "The client's strategy setting changed since the quote; quote again.",
+  NotATarget: "Under the client's rebalance setting the agent buys only the setting's target assets.",
 });
 
 export class FillmarkError extends Error {

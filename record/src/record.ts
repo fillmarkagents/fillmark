@@ -60,6 +60,7 @@ export type Fill = {
   navUpdatedAt: number; // when Chainlink last updated that price (the round's updatedAt)
   price: bigint; // fill price, same units
   maxSlipBps: number | null; // the client's slippage limit in force at the fill
+  installId: bigint | null; // the account's install on that router the fill ran under
   session: number; // 0 closed, 1 extended, 2 regular
 };
 
@@ -234,6 +235,13 @@ export function buildRecord(logs: Decoded[], feedbackLogs: Feedback[], r: Reads)
     for (const l of installsOf.get(`${router}:${account}`.toLowerCase()) ?? []) if (l.blockNumber <= at) slip = Number(l.args.maxSlipBps);
     return slip;
   };
+  // The router checks a fill's installId against the account's latest install, so it is the one
+  // from the last Installed event before the fill.
+  const installAt = (fill: Decoded): bigint | null => {
+    let id: bigint | null = null;
+    for (const l of installsOf.get(`${fill.router}:${fill.args.account as Address}`.toLowerCase()) ?? []) if (byOrder(l, fill) < 0) id = BigInt(l.args.installId as bigint);
+    return id;
+  };
 
   const fills: Fill[] = filled
     .map((l) => {
@@ -264,6 +272,7 @@ export function buildRecord(logs: Decoded[], feedbackLogs: Feedback[], r: Reads)
         navUpdatedAt: Number(fill.updatedAt),
         price: prices.fill,
         maxSlipBps: slipAt(l.router, l.args.account as Address, l.blockNumber),
+        installId: installAt(l),
         session: Number(fill.session),
       };
     })

@@ -18,6 +18,18 @@ import { FillmarkError, REASONS, errorName, reasonCode, safely } from "./errors.
 import { feedsAbi, payAbi, routerAbi } from "./generated/abi.js";
 import { MIN_NOTIONAL, buyRoom, costFloor, diffPpm, navValue, priceLimit, spotPrice } from "./math.js";
 import { many, tryMany } from "./multicall.js";
+import {
+  STRATEGIES,
+  effectiveDay,
+  invalidReason,
+  parseSetting,
+  settingHash,
+  settingJson,
+  signerOf,
+  withFingerprint,
+  type Setting,
+  type Strategy,
+} from "./settings.js";
 import { memoryStore, type Store } from "./store.js";
 
 const DAY = 86_400n;
@@ -44,6 +56,12 @@ const stockAbi = parseAbi([
   "function decimals() view returns (uint8)",
 ]);
 const identityAbi = parseAbi(["function getAgentWallet(uint256 agentId) view returns (address)"]);
+const kernelRootAbi = parseAbi(["function rootValidator() view returns (bytes21)"]);
+const validatorAbi = parseAbi(["function ecdsaValidatorStorage(address) view returns (address owner)"]);
+const ROOT_ECDSA = `0x01${ADDRESSES.ecdsaValidator.slice(2).toLowerCase()}`;
+const SETTINGS_URL = "https://api.fillmark.trade/v1/settings";
+const SETTINGS_TTL_MS = 120_000; // clients' settings are read again after this
+const MAX_SETTINGS = 100; // per account; more blocks the account
 
 export type Session = (typeof SESSIONS)[number];
 
@@ -154,8 +172,25 @@ export type Quote =
       readonly expectedPpm: bigint; // expected fill price against Chainlink, millionths, positive = worse for the client
       readonly boundBps: number; // the router's NAV bound for this fill: min(client limit - fill fee, pool cap)
       readonly twapBoundBps: number; // and its bound against the pool's TWAP: min(that, pool TWAP cap)
+      readonly strategy: Strategy | null; // the client's signed setting this fill runs under, if any
+      readonly setting: Hex | null; // its EIP-712 hash; the nonce carries the top 128 bits
     }
   | { readonly ok: false; readonly reason: string; readonly message: string };
+
+/// The strategy setting a client signed for this agent, as it applies today: none, one in effect
+/// (followed when the agent lists its strategy), or blocked (no trades for the account today).
+export type ClientSetting =
+  | { kind: "none" }
+  | {
+      kind: "active";
+      strategy: Strategy;
+      followed: boolean;
+      setting: Setting;
+      digest: Hex;
+      fingerprint: bigint;
+      since: bigint; // the UTC day it took effect, as unix seconds
+    }
+  | { kind: "blocked"; reason: string };
 
 export type FillResult = {
   hash: Hex;
@@ -204,6 +239,11 @@ export type AgentOptions = {
   extraTokens?: Address[]; // tokens beyond the bundled list, if the feeds add more
   maxClockSkewSec?: number; // the RPC's block time may be this far off the local clock (default 300)
   receiptTimeoutMs?: number; // how long a send waits for its receipt (default 120000)
+  strategies?: readonly Strategy[]; // client strategies this agent follows (default none)
+  settings?: {
+    url?: string; // where clients' signed settings are read (default api.fillmark.trade)
+    fetch?: (url: string) => Promise<unknown>; // reads a URL as JSON, for tests and self-hosting
+  };
 };
 
 /// An address in any letter case, checksummed. (A mixed-case typo is not refused, since the
@@ -249,6 +289,20 @@ export function fillmarkAgent(opts: AgentOptions) {
   const sendWallet = wallet?.account?.address ? getAddress(wallet.account.address) : undefined;
   const ns = `${router}:${agentId}:`; // store keys of this agent on this router
   const issued = new WeakSet<object>(); // quotes this instance made
+  const follows = new Set<Strategy>(opts.strategies ?? []);
+  for (const x of follows) if (!STRATEGIES.includes(x)) throw new Error(`unknown strategy ${x}`);
+  const settingsUrl = opts.settings?.url ?? SETTINGS_URL;
+  if (!/^https?:\/\//.test(settingsUrl)) throw new Error("settings.url must be an http(s) URL");
+  const getJson =
+    opts.settings?.fetch ??
+    (async (url: string) => {
+      const r = await fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(15_000) });
+      if (!r.ok) throw new Error(`the settings source answered ${r.status}`);
+      return r.json();
+    });
+  let settingsReadMs = -Infinity; // when this instance last read the settings source
+  let refreshing: { day: bigint; done: Promise<void> } | undefined; // the read for a day in progress
+  let lastRun: Promise<unknown> = Promise.resolve(); // reads run one after another
 
   let scanned = (opts.fromBlock ?? ROUTER_DEPLOY_BLOCK) - 1n;
   let span = 5_000_000n;
@@ -433,24 +487,28 @@ export function fillmarkAgent(opts: AgentOptions) {
   const pendingKey = (account: Address, token: Address) => `${ns}pending:${account}:${token}`;
   const bannedKey = (day: bigint, account: Address) => `${ns}banned:${day}:${account}`;
   const sentKey = (day: bigint) => `${ns}sent:${day}`;
+  const settingsKey = (account: Address) => `${ns}settings:${account}`;
+  const settingsDayKey = `${ns}settingsDay`; // the UTC day of the last successful read
 
-  /// The nonce of the n-th fill of an asset for an account on a UTC day, under one install.
-  function nonceOf(installId: bigint, account: Address, token: Address, day: bigint, n: bigint): bigint {
+  /// The nonce of the n-th fill of an asset for an account on a UTC day, under one install. Under
+  /// a client's setting its top 128 bits are the setting's fingerprint.
+  function nonceOf(installId: bigint, account: Address, token: Address, day: bigint, n: bigint, fp: bigint | null): bigint {
     const types = ["string", "address", "uint256", "uint64", "address", "address", "uint256", "uint256"].map((type) => ({
       type,
     }));
-    return BigInt(keccak256(encodeAbiParameters(types, ["fillmark-sdk-v1", router, agentId, installId, account, token, day, n])));
+    const base = BigInt(keccak256(encodeAbiParameters(types, ["fillmark-sdk-v1", router, agentId, installId, account, token, day, n])));
+    return fp === null ? base : withFingerprint(fp, base);
   }
 
   /// The next unused nonce index for the pair today, or undefined when the pair cap is reached.
-  async function nextIndex(installId: bigint, account: Address, token: Address, day: bigint): Promise<bigint | undefined> {
+  async function nextIndex(installId: bigint, account: Address, token: Address, day: bigint, fp: bigint | null): Promise<bigint | undefined> {
     const used = await many(
       pub,
       Array.from({ length: policy.maxFillsPerPairPerDay }, (_, n) => ({
         address: router,
         abi: routerAbi,
         functionName: "nonceUsed",
-        args: [account, nonceOf(installId, account, token, day, BigInt(n))],
+        args: [account, nonceOf(installId, account, token, day, BigInt(n), fp)],
       })),
     );
     const n = used.findIndex((u) => u === false);
@@ -473,6 +531,170 @@ export function fillmarkAgent(opts: AgentOptions) {
     store.set(pendingKey(account, token), undefined);
     const list = pendingTokens(account).filter((x) => x !== token);
     store.set(indexKey(account), list.length ? JSON.stringify(list) : undefined);
+  }
+
+  // A setting seen for an account. notBefore: the first UTC day it may apply, the day after it was
+  // stored (the source's word, never later than when this agent first saw it) or, for a setting
+  // first seen after an earlier read the same day, the next day. receivedDay: the source's word.
+  type Seen = {
+    setting: ReturnType<typeof settingJson>;
+    signature: Hex;
+    digest: Hex;
+    signer: Address;
+    seenDay: string;
+    notBefore: string;
+    receivedDay?: string;
+  };
+
+  /// Reads every setting for this agent from the source (one request), at most every two minutes,
+  /// and always again on a new UTC day. Every setting seen whose signature recovers is kept in the
+  /// store, valid or not, so a source that leaves one out later cannot take an account back to an
+  /// earlier strategy. Throws SettingsUnavailable when the source cannot be read and was not read
+  /// successfully today.
+  function refreshSettings(day: bigint): Promise<void> {
+    if (store.get(settingsDayKey) === day.toString() && Date.now() - settingsReadMs < SETTINGS_TTL_MS) return Promise.resolve();
+    if (refreshing?.day === day) return refreshing.done;
+    const run: { day: bigint; done: Promise<void> } = { day, done: Promise.resolve() };
+    run.done = lastRun.then(async () => {
+      // After any earlier read has written the store, so no read overwrites a newer list.
+      const readDay = store.get(settingsDayKey);
+      let body: any;
+      try {
+        body = await getJson(`${settingsUrl}?agent=${agentId}`);
+        if (!body || !Array.isArray(body.settings)) throw new Error("no settings list");
+      } catch {
+        if (readDay !== day.toString()) throw new FillmarkError("SettingsUnavailable");
+        settingsReadMs = Date.now(); // today's read stands; the source is tried again after the TTL
+        return;
+      }
+      const readToday = readDay === day.toString();
+      const lists = new Map<Address, Seen[]>();
+      const listOf = (a: Address) => {
+        let l = lists.get(a);
+        if (!l) lists.set(a, (l = JSON.parse(store.get(settingsKey(a)) ?? "[]") as Seen[]));
+        return l;
+      };
+      const changed = new Set<Address>();
+      for (const item of body.settings) {
+        let st: Setting, digest: Hex, signer: Address | null;
+        try {
+          // Values no wallet could sign (that cannot be hashed) are skipped.
+          st = parseSetting(item?.setting);
+          if (st.agentId !== agentId) continue;
+          digest = settingHash(st);
+          // A setting below the highest seq already in effect can never win again: it is not kept.
+          if (st.seq < floorOf(listOf(st.account), day)) continue;
+          if (typeof item.signature !== "string" || !/^0x[0-9a-fA-F]{130}$/.test(item.signature)) continue;
+          signer = await signerOf({ setting: st, signature: item.signature as Hex });
+        } catch {
+          continue;
+        }
+        if (!signer) continue;
+        let list = listOf(st.account);
+        if (list.some((x) => x.digest === digest)) continue;
+        const floor = floorOf(list, day);
+        if (list.some((x) => BigInt(x.setting.seq) < floor)) lists.set(st.account, (list = list.filter((x) => BigInt(x.setting.seq) >= floor)));
+        if (list.length > MAX_SETTINGS) continue; // the account is blocked; nothing more is kept
+        const received = Number(item.received);
+        const rd = Number.isSafeInteger(received) && received > 0 ? BigInt(Math.floor(received / 86_400)) : undefined;
+        const stored = readToday || rd === undefined || rd > day ? day : rd;
+        list.push({
+          setting: settingJson(st),
+          signature: item.signature as Hex,
+          digest,
+          signer,
+          seenDay: day.toString(),
+          notBefore: (stored + 1n).toString(),
+          ...(rd === undefined ? {} : { receivedDay: rd.toString() }),
+        });
+        changed.add(st.account);
+      }
+      for (const a of changed) store.set(settingsKey(a), JSON.stringify(lists.get(a)));
+      // A read for an earlier day that ends after one for a later day never moves the day back.
+      const cur = store.get(settingsDayKey);
+      if (cur === undefined || BigInt(cur) <= day) store.set(settingsDayKey, day.toString());
+      settingsReadMs = Date.now();
+    }).finally(() => {
+      if (refreshing === run) refreshing = undefined;
+    });
+    lastRun = run.done.catch(() => undefined);
+    refreshing = run;
+    return run.done;
+  }
+
+  /// The highest seq among an account's settings in effect on `day` (0 when none is).
+  const floorOf = (list: Seen[], day: bigint) =>
+    list.filter((x) => usableFrom(x) <= day).reduce((m, x) => (BigInt(x.setting.seq) > m ? BigInt(x.setting.seq) : m), 0n);
+
+  /// The first UTC day a seen setting may apply.
+  function usableFrom(x: Seen): bigint {
+    const e = effectiveDay(parseSetting(x.setting));
+    const n = BigInt(x.notBefore);
+    return e > n ? e : n;
+  }
+
+  /// The setting that applies to an account on the day of `t`. A setting applies from the later of
+  /// its effective day and the day after it was stored, so one day never mixes two settings. The
+  /// latest seq that applies wins, and only while the account's owner now is its signer.
+  async function settingOf(account: Address, t: bigint): Promise<ClientSetting> {
+    const day = dayOf(t);
+    await refreshSettings(day);
+    const all = JSON.parse(store.get(settingsKey(account)) ?? "[]") as Seen[];
+    if (all.length === 0) return { kind: "none" };
+    if (all.length > MAX_SETTINGS) return { kind: "blocked", reason: `more than ${MAX_SETTINGS} settings for this account` };
+    const list = all.filter((x) => usableFrom(x) <= day);
+    if (list.length === 0) {
+      // A setting already in effect by its own date that the source gave no storing day for may
+      // be in effect for another copy of this agent: wait until it applies here too.
+      const unsure = all.some((x) => x.receivedDay === undefined && effectiveDay(parseSetting(x.setting)) <= day);
+      return unsure ? { kind: "blocked", reason: "a setting waits to take effect" } : { kind: "none" };
+    }
+    let top = list[0]!;
+    for (const x of list) if (BigInt(x.setting.seq) > BigInt(top.setting.seq)) top = x;
+    if (list.some((x) => x.setting.seq === top.setting.seq && x.digest !== top.digest))
+      return { kind: "blocked", reason: "two settings share the latest seq" };
+    const st = parseSetting(top.setting);
+    const [root, owner, ...allowed] = await many(pub, [
+      { address: account, abi: kernelRootAbi, functionName: "rootValidator" },
+      { address: ADDRESSES.ecdsaValidator, abi: validatorAbi, functionName: "ecdsaValidatorStorage", args: [account] },
+      ...st.targets.map((x) => ({ address: router, abi: routerAbi, functionName: "isAllowed", args: [account, x.asset] })),
+    ]);
+    if (String(root).toLowerCase() !== ROOT_ECDSA) return { kind: "blocked", reason: "the account's root validator is not the ECDSA validator" };
+    if (getAddress(owner) !== top.signer) return { kind: "blocked", reason: "the latest setting was not signed by the account's owner now" };
+    const why = invalidReason(
+      st,
+      st.targets.filter((_, i) => allowed[i] === true).map((x) => x.asset),
+    );
+    if (why) return { kind: "blocked", reason: why };
+    return {
+      kind: "active",
+      strategy: st.strategy,
+      followed: follows.has(st.strategy),
+      setting: st,
+      digest: top.digest,
+      fingerprint: BigInt(top.digest) >> 128n,
+      since: usableFrom(top) * DAY,
+    };
+  }
+
+  /// The fingerprint a fill for the account carries today, or why the account is not traded.
+  async function settingFor(
+    account: Address,
+    t: bigint,
+  ): Promise<{ fp: bigint | null; strategy: Strategy | null; digest: Hex | null; targets: Address[] | null } | Extract<Quote, { ok: false }>> {
+    const no = (reason: string, message: string) => refuse(reason, message) as Extract<Quote, { ok: false }>;
+    let st: ClientSetting;
+    try {
+      st = await settingOf(account, t);
+    } catch (err) {
+      if (err instanceof FillmarkError) return no(err.code, err.message);
+      throw err;
+    }
+    if (st.kind === "none") return { fp: null, strategy: null, digest: null, targets: null };
+    if (st.kind === "blocked") return no("SettingBlocked", `The client's strategy setting cannot be followed now: ${st.reason}.`);
+    if (!st.followed) return no("StrategyNotFollowed", `The client chose the ${st.strategy} strategy, which this agent does not follow.`);
+    const targets = st.strategy === "rebalance" ? st.setting.targets.map((x) => x.asset) : null;
+    return { fp: st.fingerprint, strategy: st.strategy, digest: st.digest, targets };
   }
 
   /// Settles every pending fill of an account: one that landed or can no longer land is cleared,
@@ -655,6 +877,9 @@ export function fillmarkAgent(opts: AgentOptions) {
     const account = addr(args.account);
     const c = await context(account, args.asset);
     if ("ok" in c) return c;
+    const st = await settingFor(account, c.t);
+    if ("ok" in st) return st;
+    if (st.targets && !st.targets.includes(c.token)) return refuse("NotATarget");
     const m = await common(c, account, true);
     if ("ok" in m) return m;
     if (c.debt > 0n) return refuse("InDebt");
@@ -668,7 +893,7 @@ export function fillmarkAgent(opts: AgentOptions) {
     if (c.usdgBal < amount + fillFee) return refuse("NoUsdg");
     if (policy.noBuyDuringHold && c.waiting) return refuse("HoldPeriod");
     const day = dayOf(c.t);
-    const n = await nextIndex(c.cfg.installId, account, c.token, day);
+    const n = await nextIndex(c.cfg.installId, account, c.token, day, st.fp);
     if (n === undefined) return refuse("PairCap");
 
     const [sqrtP] = await read<readonly [bigint]>(m.pool!, poolAbi, "slot0");
@@ -690,7 +915,7 @@ export function fillmarkAgent(opts: AgentOptions) {
       amountIn: amount,
       minOut,
       sqrtPriceLimitX96: limit,
-      nonce: nonceOf(c.cfg.installId, account, c.token, day, n),
+      nonce: nonceOf(c.cfg.installId, account, c.token, day, n, st.fp),
       deadline: deadlineOf(c, m, true),
     };
     const bad = await simulate(intent, c.t);
@@ -706,6 +931,8 @@ export function fillmarkAgent(opts: AgentOptions) {
       navValue: navValue(q.out, m.price!, c.decimals),
       expectedPpm: diffPpm(fillPrice, m.price!),
       ...bounds(c, m),
+      strategy: st.strategy,
+      setting: st.digest,
     });
   }
 
@@ -736,6 +963,8 @@ export function fillmarkAgent(opts: AgentOptions) {
     const account = addr(args.account);
     const c = await context(account, args.asset);
     if ("ok" in c) return c;
+    const st = await settingFor(account, c.t);
+    if ("ok" in st) return st;
     const m = await common(c, account, false);
     if ("ok" in m) return m;
     if (c.lot.qty === 0n) return refuse("NotAgentUnits");
@@ -743,7 +972,7 @@ export function fillmarkAgent(opts: AgentOptions) {
     if (units === 0n) return refuse("TooSmall");
     if (units > c.lot.qty) return refuse(units > c.unitBal ? "NoUnits" : "NotAgentUnits");
     const day = dayOf(c.t);
-    const n = await nextIndex(c.cfg.installId, account, c.token, day);
+    const n = await nextIndex(c.cfg.installId, account, c.token, day, st.fp);
     if (n === undefined) return refuse("PairCap");
 
     const [sqrtP] = await read<readonly [bigint]>(m.pool!, poolAbi, "slot0");
@@ -776,7 +1005,7 @@ export function fillmarkAgent(opts: AgentOptions) {
       amountIn: units,
       minOut,
       sqrtPriceLimitX96: limit,
-      nonce: nonceOf(c.cfg.installId, account, c.token, day, n),
+      nonce: nonceOf(c.cfg.installId, account, c.token, day, n, st.fp),
       deadline: deadlineOf(c, m, false),
     };
     const bad = await simulate(intent, c.t);
@@ -792,6 +1021,8 @@ export function fillmarkAgent(opts: AgentOptions) {
       navValue: value,
       expectedPpm: -diffPpm(fillPrice, m.price!),
       ...bounds(c, m),
+      strategy: st.strategy,
+      setting: st.digest,
     });
   }
 
@@ -815,6 +1046,9 @@ export function fillmarkAgent(opts: AgentOptions) {
     if ((await resolvePending(it.account, t)).has(token)) throw new FillmarkError("Pending");
     if (store.get(bannedKey(day, it.account))) throw new FillmarkError("RevertedToday");
     if (!(await isPlainKernel(pub, it.account))) throw new FillmarkError("NotPlainKernel");
+    const st = await settingFor(it.account, t);
+    if ("ok" in st) throw new FillmarkError(st.reason, st.message);
+    if (st.digest !== q.setting) throw new FillmarkError("SettingChanged");
     const eth = await pub.getBalance({ address: sendWallet! });
     if (eth < policy.minEth) throw new FillmarkError("LowEth");
 
@@ -994,6 +1228,7 @@ export function fillmarkAgent(opts: AgentOptions) {
     agentId,
     policy,
     check: safely(check),
+    setting: safely(async (account: Address) => settingOf(addr(account), await now())),
     clients: safely(clients),
     market: safely((assets?: string[]) => market(assets?.length ? assets.map(tokenOf) : undefined)),
     maxBuy: safely(maxBuy),

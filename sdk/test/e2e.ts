@@ -92,7 +92,10 @@ const A6 = create(["--max-per-trade", "50", "--daily-limit", "200", "--expiry-da
 await fund(A5, "100");
 await fund(A6, "100");
 
-const agent = fillmarkAgent({ publicClient: pub, walletClient: agentWallet, agentId, fromBlock: startBlock, maxClockSkewSec: 100_000 });
+// Client settings come from the live api.fillmark.trade, which has none for fork accounts; with
+// FILLMARK_E2E_NO_API=1 (a machine that cannot reach it) an empty source stands in.
+const settings = process.env.FILLMARK_E2E_NO_API === "1" ? { fetch: async () => ({ settings: [] }) } : undefined;
+const agent = fillmarkAgent({ publicClient: pub, walletClient: agentWallet, agentId, fromBlock: startBlock, maxClockSkewSec: 100_000, settings });
 
 step("check");
 const chk = await agent.check();
@@ -175,7 +178,7 @@ assert.ok((await agent.maxBuy(A1, "cbBTC")) === usd("50"));
 
 step("a sale under the lot's cost is refused by the policy; with the policy off it fills");
 refused(await agent.quoteSell({ account: A1, asset: Y }), "BelowCost");
-const free = fillmarkAgent({ publicClient: pub, walletClient: agentWallet, agentId, fromBlock: startBlock, maxClockSkewSec: 100_000, policy: { saleAboveCost: false } });
+const free = fillmarkAgent({ publicClient: pub, walletClient: agentWallet, agentId, fromBlock: startBlock, maxClockSkewSec: 100_000, settings, policy: { saleAboveCost: false } });
 const qs = ok(await free.quoteSell({ account: A1, asset: Y }));
 const lotBefore = (await pub.readContract({ address: ADDRESSES.router, abi: routerAbi, functionName: "positionOf", args: [A1, agentId, YT] }))[0];
 assert.equal(qs.intent.amountIn, lotBefore.qty, "a small lot is sold whole");
@@ -213,13 +216,13 @@ beating = true;
 refused(await agent.quoteBuy({ account: A3, asset: Y, usdgIn: usd("15") }), "RevertedToday");
 
 step("the daily send cap counts every send");
-const capped = fillmarkAgent({ publicClient: pub, walletClient: agentWallet, agentId, fromBlock: startBlock, maxClockSkewSec: 100_000, policy: { maxFillsPerDay: 1 } });
+const capped = fillmarkAgent({ publicClient: pub, walletClient: agentWallet, agentId, fromBlock: startBlock, maxClockSkewSec: 100_000, settings, policy: { maxFillsPerDay: 1 } });
 await capped.fill(ok(await capped.quoteBuy({ account: A3, asset: Y, usdgIn: usd("15") })));
 const q4 = ok(await capped.quoteBuy({ account: A3, asset: Y, usdgIn: usd("15") }));
 await assert.rejects(capped.fill(q4), (e: any) => e instanceof FillmarkError && e.code === "DailyCap");
 
 step("a revert seen only after the receipt wait timed out still skips the account");
-const slow = fillmarkAgent({ publicClient: pub, walletClient: agentWallet, agentId, fromBlock: startBlock, maxClockSkewSec: 100_000, receiptTimeoutMs: 2000 });
+const slow = fillmarkAgent({ publicClient: pub, walletClient: agentWallet, agentId, fromBlock: startBlock, maxClockSkewSec: 100_000, settings, receiptTimeoutMs: 2000 });
 const qt = ok(await slow.quoteBuy({ account: A5, asset: X, usdgIn: usd("12") }));
 beating = false;
 await test.setAutomine(false);
@@ -273,7 +276,7 @@ await pub.waitForTransactionReceipt({ hash: await acct.writeContract({ address: 
 await pub.waitForTransactionReceipt({ hash: await acct.writeContract({ address: ADDRESSES.pay, abi: payAbi, functionName: "open", args: [agentId, 2, 100, [XT]] }) });
 await test.stopImpersonatingAccount({ address: A3 });
 const before = await agent.pay.due(A3);
-const fresh = fillmarkAgent({ publicClient: pub, walletClient: agentWallet, agentId, fromBlock: startBlock, maxClockSkewSec: 100_000 });
+const fresh = fillmarkAgent({ publicClient: pub, walletClient: agentWallet, agentId, fromBlock: startBlock, maxClockSkewSec: 100_000, settings });
 await fresh.fill(ok(await fresh.quoteBuy({ account: A3, asset: X, usdgIn: usd("20") })));
 const after = await agent.pay.due(A3);
 assert.ok(after.accrued > before.accrued, "the fill is billed");

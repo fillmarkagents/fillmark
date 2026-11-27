@@ -173,6 +173,13 @@ export const rebalanceNonce = (account: Address, token: Address, day: bigint, se
     [{ type: "string" }, { type: "address" }, { type: "address" }, { type: "uint256" }, { type: "bool" }, { type: "uint256" }],
     ["fillmark-rb-v1", account, token, day, sell, n],
   );
+/// A fill sent with @fillmark/sdk 0.1.0 or later: the n-th of an asset for an account on a UTC day
+/// under one install (buys and sales share n). Under a setting the SDK puts its fingerprint on top.
+export const sdkNonce = (router: Address, agentId: bigint, installId: bigint, account: Address, token: Address, day: bigint, n: bigint) =>
+  nonce(
+    [{ type: "string" }, { type: "address" }, { type: "uint256" }, { type: "uint64" }, { type: "address" }, { type: "address" }, { type: "uint256" }, { type: "uint256" }],
+    ["fillmark-sdk-v1", router, agentId, installId, account, token, day, n],
+  );
 /// The id the router logs for a fill under `nonce`.
 export const fillIdOf = (router: Address, account: Address, n: bigint): Hex =>
   keccak256(encodeAbiParameters([{ type: "uint256" }, { type: "address" }, { type: "address" }, { type: "uint256" }], [BigInt(CHAIN_ID), router, account, n])).toLowerCase() as Hex;
@@ -184,8 +191,9 @@ export type FillTag = { strategy: Strategy; setting: Hex | null };
 
 /// Tags each fill whose fillId matches a nonce the reference agent builds for that fill's account,
 /// asset, side and UTC day: its own dca (no setting), or a setting of the account (any of them, so
-/// the proof needs no knowledge of which one was in effect). A fill no candidate matches (another
-/// agent's software) is left out; buys of agent 0.1.0 count when their plan was daily. A setting is
+/// the proof needs no knowledge of which one was in effect). Fills sent with @fillmark/sdk under a
+/// setting match too, with the setting's strategy. A fill no candidate matches (other software, or
+/// the SDK with no setting) is left out; buys of agent 0.1.0 count when their plan was daily. A setting is
 /// tried only for fills from its effective day on, as the agent never uses it before. `only`, when
 /// given, limits the work to those fill ids (lowercased); counts still come from every fill. Sales of an asset on one day
 /// are numbered from 0, so a fill's n is below the number of that day's fills on its side.
@@ -193,10 +201,11 @@ export function tagFills(fills: readonly Fill[], settings: ReadonlyMap<string, r
   const out = new Map<string, FillTag>();
   const count = new Map<string, number>();
   const keyOf = (f: Fill, day: bigint) => `${f.router.toLowerCase()}|${f.account.toLowerCase()}|${f.stock.toLowerCase()}|${day}|${f.buy ? "b" : "s"}`;
+  const pairOf = (f: Fill, day: bigint) => `${f.router.toLowerCase()}|${f.account.toLowerCase()}|${f.stock.toLowerCase()}|${day}`;
   for (const f of fills) {
     if (f.time === null) continue;
-    const k = keyOf(f, BigInt(f.time) / 86_400n);
-    count.set(k, (count.get(k) ?? 0) + 1);
+    const day = BigInt(f.time) / 86_400n;
+    for (const k of [keyOf(f, day), pairOf(f, day)]) count.set(k, (count.get(k) ?? 0) + 1);
   }
   const fps = new Map<string, { s: Setting; fp: bigint; digest: Hex; from: bigint }[]>();
   for (const [a, list] of settings) fps.set(a.toLowerCase(), list.map((s) => ({ s, fp: fingerprint(s), digest: settingHash(s), from: effectiveDay(s) })));
@@ -204,6 +213,7 @@ export function tagFills(fills: readonly Fill[], settings: ReadonlyMap<string, r
     if (f.time === null || (only && !only.has(f.fillId.toLowerCase()))) continue;
     const day = BigInt(f.time) / 86_400n;
     const k = BigInt(count.get(keyOf(f, day)) ?? 0);
+    const kPair = BigInt(count.get(pairOf(f, day)) ?? 0); // the SDK numbers buys and sales together
     const want = f.fillId.toLowerCase();
     const id = (n: bigint) => fillIdOf(f.router, f.account, n);
     const match = (candidates: () => Iterable<bigint>) => {
@@ -226,11 +236,15 @@ export function tagFills(fills: readonly Fill[], settings: ReadonlyMap<string, r
     for (const x of fps.get(f.account.toLowerCase()) ?? []) {
       if (x.s.agentId !== f.agentId || x.from > day) continue;
       const found =
-        x.s.strategy === "dca"
+        (x.s.strategy === "dca"
           ? match(() => dcaNonces(x.fp))
           : match(function* () {
               for (let n = 0n; n < k; n++) yield withFingerprint(x.fp, rebalanceNonce(f.account, f.stock, day, !f.buy, n));
-            });
+            })) ||
+        (typeof f.installId === "bigint" &&
+          match(function* () {
+            for (let n = 0n; n < kPair; n++) yield withFingerprint(x.fp, sdkNonce(f.router, f.agentId, f.installId!, f.account, f.stock, day, n));
+          }));
       if (found) {
         out.set(want, { strategy: x.s.strategy, setting: x.digest });
         break;

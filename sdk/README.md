@@ -19,6 +19,7 @@ const agent = fillmarkAgent({
   publicClient: createPublicClient({ chain: robinhood, transport }),
   walletClient: createWalletClient({ chain: robinhood, transport, account: privateKeyToAccount(agentKey) }),
   agentId: 123n, // the agent's ERC-8004 id; the key must be its agent wallet
+  strategies: ["dca"], // client strategies this agent follows (see Client strategy settings)
 });
 
 await agent.check(); // chain, clock, and that the key is the agent wallet
@@ -39,6 +40,7 @@ for (const client of await agent.clients()) {
 | Call | |
 | --- | --- |
 | `check()` | Chain id, the RPC's clock, and that the wallet client is the agent wallet pinned in the ERC-8004 registry |
+| `setting(account)` | The strategy setting the account's owner signed for this agent, as it applies today: none, active (and whether this agent follows it) or blocked |
 | `clients()` | Accounts with this agent installed: limits, allowed assets, USDG, rolling 24-hour use, fee debt, whether buys are open |
 | `market(assets?)` | Session, Chainlink price and age, the router pool's price against it, and whether the asset trades now |
 | `maxBuy`, `maxSell` | The largest buy or sale the client's limits, balance and the agent's lot allow now |
@@ -62,6 +64,17 @@ The router enforces each client's limits. The SDK adds rules that keep an agent 
 7. One send at a time, and no new fill for an account and asset while the previous one is pending.
 
 Rules 1 to 3 can be changed through `policy`; 4 to 7 cannot. The policy state lives in memory unless a `store` is passed (see `memoryStore` for the interface); a store on disk keeps the caps across restarts.
+
+## Client strategy settings
+
+A client chooses a strategy for an agent by signing a setting in the Fillmark app (EIP-712, no transaction): `dca` with a take-profit level, or `rebalance` with target weights, a cash share and a drift threshold or schedule. The app stores it at api.fillmark.trade. List the strategies the agent follows in `strategies`; the SDK then marks every fill with the account's setting and refuses accounts it cannot follow:
+
+- A setting applies from the later of its own start day and the day after it was stored (00:00 UTC); one the source shows only after an earlier read the same day applies from the next day. So one day never mixes two settings. The latest `seq` wins, and only while the account's owner is the signer.
+- A fill under a setting carries the top 128 bits of the setting's EIP-712 hash in the top 128 bits of its nonce. The router logs each fill's id from that nonce, so the Fillmark record shows which of the client's settings each fill was sent under. Under `rebalance` the SDK buys only the setting's target assets (`NotATarget`); when and how much to trade is the agent's code.
+- Quotes for an account whose setting is in effect are refused with `StrategyNotFollowed` when the agent does not list its strategy, and with `SettingBlocked` when the latest setting cannot be followed (signed by someone other than the owner now, a strategy or field this SDK does not accept, a target asset the account no longer allows, two settings with the same `seq`).
+- All the agent's settings are read in one request, again every two minutes and on each new UTC day, and every one seen is kept in the `store`. Pass a store on disk: with the default memory store, a restart forgets which settings were already seen today. If the source cannot be read and was not read today, quotes are refused with `SettingsUnavailable`.
+
+What a strategy means (when to buy, sell or rebalance) is the agent's own code: `setting(account)` returns the signed parameters. `settings.url` points at another source with the same answer format, for self-hosting; a custom `settings.fetch` must time out on its own.
 
 ## Notes
 

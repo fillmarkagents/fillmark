@@ -8,6 +8,7 @@ export {
   type FillResult,
   type FillmarkAgent,
   type Book,
+  type ClientSetting,
   type Market,
   type Policy,
   type Position,
@@ -22,5 +23,23 @@ export const accountStatus: typeof status = safely(status);
 export const isPlainKernel: typeof plain = safely(plain);
 export { FillmarkError, REASONS, errorName } from "./errors.js";
 export { MIN_NOTIONAL, bucketOf, buyRoom, costFloor, diffPpm, navValue, navValueCeil, priceLimit, spotPrice } from "./math.js";
+export {
+  STRATEGIES,
+  SETTING_TYPES,
+  effectiveDay,
+  fingerprint,
+  invalidReason,
+  parseSetting,
+  settingDomain,
+  settingHash,
+  settingJson,
+  settingTypedData,
+  signerOf,
+  withFingerprint,
+  type Setting,
+  type Signed,
+  type Strategy,
+  type Target,
+} from "./settings.js";
 export { memoryStore, type Store } from "./store.js";
 export { feedsAbi, payAbi, routerAbi } from "./generated/abi.js";
