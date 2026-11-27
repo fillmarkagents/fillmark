@@ -13,6 +13,7 @@ import {
   REASONS,
   accountStatus,
   assetOf,
+  type ClientSetting,
   errorName,
   fillmarkAgent,
   memoryStore,
@@ -34,40 +35,55 @@ import { robinhood } from "viem/chains";
 import { z } from "zod";
 import { fileStore, loadConfig, privateDir, readSecret, takeLock } from "./config.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 const QUOTE_TTL_MS = 60_000;
 const RECEIPT_TIMEOUT_MS = 30_000; // under the MCP client's own request timeout
 
-const cfg = loadConfig();
-const transport = http(cfg.rpc, { timeout: 30_000 });
-const pub = createPublicClient({ chain: robinhood, transport });
-let wallet;
-if (cfg.fills) {
-  const key = readSecret(cfg.keyFile!);
-  if (!/^0x[0-9a-fA-F]{64}$/.test(key)) throw new Error(`${cfg.keyFile} does not hold a 0x-prefixed 32-byte private key`);
-  wallet = createWalletClient({ chain: robinhood, transport, account: privateKeyToAccount(key as Hex) });
-  // One sending server per agent and per wallet: two would race the wallet's nonces and the caps.
-  privateDir(cfg.stateDir);
-  const lockDir = join(homedir(), ".fillmark-mcp", "locks");
-  privateDir(lockDir);
-  const releases: (() => void)[] = [];
-  process.on("exit", () => releases.forEach((r) => r()));
-  releases.push(
-    takeLock(join(lockDir, `wallet-${wallet.account.address.toLowerCase()}.lock`), `wallet ${wallet.account.address}`),
-  );
-  releases.push(takeLock(join(cfg.stateDir, `agent-${cfg.agentId}.lock`), `agent ${cfg.agentId}`));
-  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(sig, () => process.exit(0));
+/// Startup problems (a missing variable, a file with the wrong mode, a held lock) end the process
+/// with one line on stderr, not a stack trace.
+function start() {
+  const cfg = loadConfig();
+  const transport = http(cfg.rpc, { timeout: 30_000 });
+  const pub = createPublicClient({ chain: robinhood, transport });
+  let wallet;
+  if (cfg.fills) {
+    const key = readSecret(cfg.keyFile!);
+    if (!/^0x[0-9a-fA-F]{64}$/.test(key)) throw new Error(`${cfg.keyFile} does not hold a 0x-prefixed 32-byte private key`);
+    wallet = createWalletClient({ chain: robinhood, transport, account: privateKeyToAccount(key as Hex) });
+    // One sending server per agent and per wallet: two would race the wallet's nonces and the caps.
+    privateDir(cfg.stateDir);
+    const lockDir = join(homedir(), ".fillmark-mcp", "locks");
+    privateDir(lockDir);
+    const releases: (() => void)[] = [];
+    process.on("exit", () => releases.forEach((r) => r()));
+    releases.push(
+      takeLock(join(lockDir, `wallet-${wallet.account.address.toLowerCase()}.lock`), `wallet ${wallet.account.address}`),
+    );
+    releases.push(takeLock(join(cfg.stateDir, `agent-${cfg.agentId}.lock`), `agent ${cfg.agentId}`));
+    for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(sig, () => process.exit(0));
+  }
+  // Only the sending server keeps state on disk; a read-only server never sends and keeps none.
+  const store = cfg.fills ? fileStore(cfg.stateDir, cfg.agentId) : memoryStore();
+  const agent = fillmarkAgent({
+    publicClient: pub,
+    walletClient: wallet,
+    agentId: cfg.agentId,
+    store,
+    receiptTimeoutMs: RECEIPT_TIMEOUT_MS,
+    policy: { maxFillsPerDay: cfg.maxFillsPerDay, minEth: parseEther(cfg.minEth), deadlineSec: QUOTE_TTL_MS / 1000 },
+    strategies: cfg.strategies,
+    settings: cfg.settingsUrl ? { url: cfg.settingsUrl } : undefined,
+  });
+  return { cfg, pub, store, agent };
 }
-// Only the sending server keeps state on disk; a read-only server never sends and keeps none.
-const store = cfg.fills ? fileStore(cfg.stateDir, cfg.agentId) : memoryStore();
-const agent = fillmarkAgent({
-  publicClient: pub,
-  walletClient: wallet,
-  agentId: cfg.agentId,
-  store,
-  receiptTimeoutMs: RECEIPT_TIMEOUT_MS,
-  policy: { maxFillsPerDay: cfg.maxFillsPerDay, minEth: parseEther(cfg.minEth), deadlineSec: QUOTE_TTL_MS / 1000 },
-});
+let started: ReturnType<typeof start>;
+try {
+  started = start();
+} catch (err) {
+  console.error(`fillmark-mcp: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+}
+const { cfg, pub, store, agent } = started;
 
 const usdg = (v: bigint) => formatUnits(v, 6);
 const units = (token: Address, v: bigint) => formatUnits(v, assetOf(token)?.decimals ?? 18);
@@ -76,6 +92,28 @@ const bps = (ppm: bigint | undefined) => (ppm === undefined ? undefined : (Numbe
 const ticker = (token: Address) => assetOf(token)?.ticker ?? token;
 const iso = (t: bigint) => new Date(Number(t) * 1000).toISOString();
 const address = z.string().regex(/^0x[0-9a-fA-F]{40}$/, "an address");
+
+/// A client's strategy setting for this agent, as the tools show it.
+function settingJson(st: ClientSetting) {
+  if (st.kind === "none") return { state: "none" };
+  if (st.kind === "blocked") return { state: "blocked", reason: st.reason };
+  const s = st.setting;
+  return {
+    state: "active",
+    strategy: st.strategy,
+    followedByThisServer: st.followed,
+    since: iso(st.since),
+    setting: st.digest,
+    ...(s.strategy === "dca"
+      ? { takeProfitBps: s.takeProfitBps }
+      : {
+          targets: s.targets.map((x) => ({ asset: x.ticker, weightBps: x.weightBps })),
+          cashBps: s.cashBps,
+          driftBps: s.driftBps,
+          everyDays: s.everyDays,
+        }),
+  };
+}
 
 function reply(value: unknown) {
   const text = JSON.stringify(value, (_, v) => (typeof v === "bigint" ? v.toString() : v), 2);
@@ -104,11 +142,14 @@ server.registerTool(
   "list_clients",
   {
     title: "List client accounts",
-    description: "Client accounts that installed this agent on the Fillmark router, with their limits, USDG and allowed assets.",
+    description:
+      "Client accounts that installed this agent on the Fillmark router, with their limits, USDG, allowed assets and the strategy setting the client signed for this agent (fills follow it only when this server lists its strategy).",
     annotations: read,
   },
-  guard(async () =>
-    (await agent.clients()).map((c) => ({
+  guard(async () => {
+    const list = await agent.clients();
+    const settings = await Promise.all(list.map((c) => agent.setting(c.account).then(settingJson, () => ({ state: "unavailable" }))));
+    return list.map((c, i) => ({
       account: c.account,
       assets: c.assets.map(ticker),
       maxPerTradeUsdg: usdg(c.maxPerTrade),
@@ -123,8 +164,9 @@ server.registerTool(
       canBuy: c.canBuy,
       salesAllowedUntil: iso(c.sellUntil),
       tradable: c.plainKernel,
-    })),
-  ),
+      strategySetting: settings[i],
+    }));
+  }),
 );
 
 server.registerTool(
@@ -207,6 +249,8 @@ server.registerTool(
       chainlinkValueUsdg: usdg(q.navValue),
       expectedBpsVsChainlink: bps(q.expectedPpm),
       routerBoundBps: q.boundBps,
+      strategy: q.strategy,
+      setting: q.setting,
       expiresInSec: QUOTE_TTL_MS / 1000,
       note: cfg.fills ? "send it with fill" : "fills are off on this server (read mode)",
     };
@@ -335,5 +379,5 @@ server.registerTool(
 
 await server.connect(new StdioServerTransport());
 console.error(
-  `fillmark-mcp ${VERSION}: agent ${cfg.agentId}, ${cfg.fills ? "fills on" : "read mode"}${cfg.rpc ? "" : ", public RPC"}`,
+  `fillmark-mcp ${VERSION}: agent ${cfg.agentId}, ${cfg.fills ? "fills on" : "read mode"}${cfg.rpc ? "" : ", public RPC"}, strategies followed: ${cfg.strategies.join(", ") || "none"}`,
 );

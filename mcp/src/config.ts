@@ -2,7 +2,7 @@ import { existsSync, linkSync, mkdirSync, readFileSync, renameSync, statSync, un
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Store } from "@fillmark/sdk";
+import { STRATEGIES, type Store, type Strategy } from "@fillmark/sdk";
 
 export type Config = {
   agentId: bigint;
@@ -12,6 +12,8 @@ export type Config = {
   maxFillsPerDay: number;
   minEth: string;
   stateDir: string;
+  strategies: Strategy[];
+  settingsUrl: string | undefined;
 };
 
 /// A secret file must be readable by its owner only.
@@ -25,7 +27,7 @@ export function readSecret(path: string): string {
 
 export function loadConfig(env = process.env): Config {
   const id = env.FILLMARK_AGENT_ID ?? "";
-  if (!/^[0-9]{1,30}$/.test(id)) throw new Error("set FILLMARK_AGENT_ID to the agent's ERC-8004 id");
+  if (!/^[0-9]{1,30}$/.test(id)) throw new Error("set FILLMARK_AGENT_ID to the agent's ERC-8004 id (digits only)");
   const rpc = env.FILLMARK_RPC || (env.FILLMARK_RPC_FILE ? readSecret(env.FILLMARK_RPC_FILE) : undefined);
   if (rpc !== undefined && !/^https?:\/\//.test(rpc)) throw new Error("the RPC must be an http(s) URL");
   const keyFile = env.FILLMARK_KEY_FILE || undefined;
@@ -37,6 +39,14 @@ export function loadConfig(env = process.env): Config {
     throw new Error("FILLMARK_MAX_FILLS_PER_DAY must be 1 to 1000");
   const minEth = env.FILLMARK_MIN_ETH ?? "0.0005";
   if (!/^[0-9]+(\.[0-9]{1,18})?$/.test(minEth)) throw new Error("FILLMARK_MIN_ETH must be an ETH amount");
+  const strategies = (env.FILLMARK_STRATEGIES ?? "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter((x) => x !== "");
+  for (const x of strategies)
+    if (!(STRATEGIES as readonly string[]).includes(x)) throw new Error(`FILLMARK_STRATEGIES: unknown strategy ${x} (known: ${STRATEGIES.join(", ")})`);
+  const settingsUrl = env.FILLMARK_SETTINGS_URL || undefined;
+  if (settingsUrl !== undefined && !/^https?:\/\//.test(settingsUrl)) throw new Error("FILLMARK_SETTINGS_URL must be an http(s) URL");
   return {
     agentId: BigInt(id),
     rpc,
@@ -45,6 +55,8 @@ export function loadConfig(env = process.env): Config {
     maxFillsPerDay,
     minEth,
     stateDir: env.FILLMARK_STATE_DIR || join(homedir(), ".fillmark-mcp"),
+    strategies: [...new Set(strategies)] as Strategy[],
+    settingsUrl,
   };
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "@fillmark/mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server that lets an AI agent trade through the Fillmark router on Robinhood Chain as an ERC-8004 agent.",
   "license": "MIT",
   "type": "module",
@@ -41,7 +41,7 @@
     "prepublishOnly": "node scripts/check-release.mjs"
   },
   "dependencies": {
-    "@fillmark/sdk": "0.1.0",
+    "@fillmark/sdk": "0.2.0",
     "@modelcontextprotocol/sdk": "1.32.2",
     "viem": "2.57.20",
     "zod": "4.6.7"

@@ -4,12 +4,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createPublicClient, createTestClient, createWalletClient, getAddress, http, parseAbi, parseUnits, type Address } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { robinhood } from "viem/chains";
+import { settingHash, settingJson, settingTypedData, type Setting } from "@fillmark/sdk";
 
 const root = process.env.FILLMARK_ROOT!;
 const work = process.env.FILLMARK_E2E_DIR!;
@@ -47,9 +49,24 @@ assert.equal(r.status, 0, r.stderr);
 const A1 = getAddress(JSON.parse(r.stdout).account) as Address;
 await test.request({ method: "anvil_dealERC20" as any, params: [A1, "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", "0x" + parseUnits("300", 6).toString(16)] as any });
 
+// The settings source: what api.fillmark.trade answers, here a dca setting A1's owner signed,
+// stored yesterday so it is in effect today.
+const day0 = (await pub.getBlock()).timestamp / 86_400n;
+const setting: Setting = { account: A1, agentId, strategy: "dca", takeProfitBps: 500, targets: [], cashBps: 0, driftBps: 0, everyDays: 0, validFrom: (day0 - 2n) * 86_400n, seq: 1n };
+const signature = await clientKey.account.signTypedData(settingTypedData(setting) as any);
+const digest = settingHash(setting);
+const settingsServer = createServer((req, res) => {
+  const u = new URL(req.url ?? "/", "http://x");
+  const mine = u.pathname === "/v1/settings" && u.searchParams.get("agent") === String(agentId) && !u.searchParams.has("account");
+  res.setHeader("content-type", "application/json");
+  res.end(JSON.stringify({ agentId: String(agentId), settings: mine ? [{ setting: settingJson(setting), signature, digest, received: Number((day0 - 1n) * 86_400n + 600n) }] : [] }));
+});
+await new Promise<void>((ok) => settingsServer.listen(0, "127.0.0.1", ok));
+const settingsUrl = `http://127.0.0.1:${(settingsServer.address() as any).port}/v1/settings`;
+
 const server = join(root, "mcp/dist/index.js");
 const stateDir = join(work, "state");
-const baseEnv = { PATH: process.env.PATH!, HOME: work, FILLMARK_AGENT_ID: String(agentId), FILLMARK_RPC: rpc, FILLMARK_STATE_DIR: stateDir };
+const baseEnv = { PATH: process.env.PATH!, HOME: work, FILLMARK_AGENT_ID: String(agentId), FILLMARK_RPC: rpc, FILLMARK_STATE_DIR: stateDir, FILLMARK_SETTINGS_URL: settingsUrl };
 const outputs: string[] = [];
 async function connect(env: Record<string, string>) {
   const client = new Client({ name: "fillmark-e2e", version: "0.0.0" });
@@ -69,8 +86,20 @@ async function connect(env: Record<string, string>) {
 mkdirSync(join(work, ".fillmark-mcp", "locks"), { recursive: true, mode: 0o700 });
 writeFileSync(join(work, ".fillmark-mcp", "locks", `wallet-${agentKey.account.address.toLowerCase()}.lock`), "0\n", { mode: 0o600 });
 
+step("startup errors are one line on stderr");
+for (const [env, re] of [
+  [{ FILLMARK_AGENT_ID: "" }, /^fillmark-mcp: set FILLMARK_AGENT_ID to the agent's ERC-8004 id \(digits only\)\n$/],
+  [{ FILLMARK_STRATEGIES: "dca,momentum" }, /^fillmark-mcp: FILLMARK_STRATEGIES: unknown strategy momentum/],
+  [{ FILLMARK_ENABLE_FILLS: "1" }, /^fillmark-mcp: FILLMARK_ENABLE_FILLS=1 needs FILLMARK_KEY_FILE\n$/],
+] as const) {
+  const bad = spawnSync(process.execPath, [server], { env: { ...baseEnv, ...env }, input: "", encoding: "utf8", timeout: 30_000 });
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, re);
+  assert.ok(!/\n\s+at /.test(bad.stderr), bad.stderr);
+}
+
 step("fills on, started first in an empty state dir over a stale lock: seven tools with their hints");
-const rw = await connect({ FILLMARK_KEY_FILE: agentKey.path, FILLMARK_ENABLE_FILLS: "1", FILLMARK_MAX_FILLS_PER_DAY: "4" });
+const rw = await connect({ FILLMARK_KEY_FILE: agentKey.path, FILLMARK_ENABLE_FILLS: "1", FILLMARK_MAX_FILLS_PER_DAY: "4", FILLMARK_STRATEGIES: "dca" });
 const tools = (await rw.client.listTools()).tools;
 assert.deepEqual(tools.map((t) => t.name).sort(), ["fees", "fill", "list_clients", "market", "quote", "record", "settle_fees"]);
 assert.equal(tools.find((t) => t.name === "fill")!.annotations?.destructiveHint, true);
@@ -85,22 +114,32 @@ step("a read-only server runs beside it and has no send tools");
 const ro = await connect({});
 const roTools = (await ro.client.listTools()).tools.map((t) => t.name).sort();
 assert.deepEqual(roTools, ["fees", "list_clients", "market", "quote", "record"]);
-await ro.client.close();
+
 
 step("list_clients and market");
 const cl = await rw.call("list_clients");
 assert.equal(cl.json.length, 1);
 assert.equal(cl.json[0].account, A1);
 assert.equal(cl.json[0].maxPerTradeUsdg, "50");
+assert.deepEqual(
+  { ...cl.json[0].strategySetting, since: undefined },
+  { state: "active", strategy: "dca", followedByThisServer: true, since: undefined, setting: digest, takeProfitBps: 500 },
+);
 const mk = await rw.call("market", { assets: LIST });
 const usable = mk.json.filter((m: any) => m.tradable && Math.abs(Number(m.poolPremiumBps)) <= m.poolCapBps - 40).map((m: any) => m.asset);
 if (usable.length < 2) throw new Error(`STOP: only ${usable.length} assets inside their pool bounds now; run again later`);
 const [X, Y] = usable;
 console.log(`   trading ${X} and ${Y}`);
 
+step("a server that lists no strategy does not trade an account whose client chose one");
+const roQuote = await ro.call("quote", { side: "buy", account: A1, asset: X, amount: "15" });
+assert.deepEqual([roQuote.json.ok, roQuote.json.reason], [false, "StrategyNotFollowed"], roQuote.text);
+await ro.client.close();
+
 step("quote and fill; a quote is sent once");
 const q = await rw.call("quote", { side: "buy", account: A1, asset: X, amount: "15" });
 assert.equal(q.json.ok, true, q.text);
+assert.deepEqual([q.json.strategy, q.json.setting], ["dca", digest]);
 const f = await rw.call("fill", { quote_id: q.json.quote_id });
 assert.equal(f.error, false, f.text);
 assert.equal(f.json.usdg, "15");
@@ -156,4 +195,5 @@ await rw.client.close();
 step("no output carries the RPC URL");
 assert.ok(!outputs.join("\n").includes(SECRET), "the RPC URL leaked");
 clearInterval(beat);
+settingsServer.close();
 console.log("MCP E2E OK");

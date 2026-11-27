@@ -1,15 +1,15 @@
 {
   "name": "@fillmark/mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "@fillmark/mcp",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "license": "MIT",
       "dependencies": {
-        "@fillmark/sdk": "0.1.0",
+        "@fillmark/sdk": "0.2.0",
         "@modelcontextprotocol/sdk": "1.32.2",
         "viem": "2.57.20",
         "zod": "4.6.7"
@@ -475,9 +475,9 @@
       }
     },
     "node_modules/@fillmark/sdk": {
-      "version": "0.1.0",
-      "resolved": "https://registry.npmjs.org/@fillmark/sdk/-/sdk-0.1.0.tgz",
-      "integrity": "sha512-mGQvbOMdglfwWnPiYll/9Yh7i5ZSE3HmvWwKn+lGoyeQXNiQw4AWFPzPi9CwNIYYLadK0GPbszY3sqeIid9Ozw==",
+      "version": "0.2.0",
+      "resolved": "https://registry.npmjs.org/@fillmark/sdk/-/sdk-0.2.0.tgz",
+      "integrity": "sha512-fS9sXCl9JO8D+oam2piZGZGUse+cKym+qT0yqOo/NDl9twYM1Iy4kiFfK6oFYKLlILKWIUopmLuoyS7q2ffS0w==",
       "license": "MIT",
       "engines": {
         "node": ">=22.14"
